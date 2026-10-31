@@ -1032,8 +1032,8 @@ static GtkWidget *build_setup_page(void)
             "beginnen (z. B. .Trash, .thumbnails).", NULL, ui.hidden_sw, NULL, NULL);
     ui.symlinks_sw = new_switch();
     gtk_switch_set_active(GTK_SWITCH(ui.symlinks_sw), TRUE);
-    add_row(list, "Symbolische Links nicht verfolgen", "Sonst würden verlinkte Dateien als Duplikat "
-            "ihres Ziels erscheinen.", NULL, ui.symlinks_sw, NULL, NULL);
+    add_row(list, "Symbolische Links nicht verfolgen", "Sonst werden auch die Ziele von Links "
+            "durchsucht und unter ihrem echten Pfad gezeigt.", NULL, ui.symlinks_sw, NULL, NULL);
     ui.hardlinks_sw = new_switch();
     gtk_switch_set_active(GTK_SWITCH(ui.hardlinks_sw), TRUE);
     add_row(list, "Hardlinks nur einmal zählen", "Mehrere Namen derselben Datei belegen den Platz "

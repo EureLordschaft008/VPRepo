@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "df_internal.h"
@@ -238,6 +239,21 @@ static void set_err(char *err, size_t errsz, GError *e, const char *fallback)
     snprintf(err, errsz, "%s", e ? e->message : fallback);
 }
 
+/* Spricht etwas dagegen, path durch einen Link auf target zu ersetzen? Fehlt target oder führt es
+ * über Links zu path selbst, wäre der Inhalt danach weg. Ein Link als path verliert nichts. */
+static const char *link_problem(const char *path, const char *target)
+{
+    char *real_target = realpath(target, NULL);
+    if (!real_target) return "die Zieldatei fehlt";
+    struct stat st;
+    char *real_path = NULL;
+    if (lstat(path, &st) == 0 && !S_ISLNK(st.st_mode)) real_path = realpath(path, NULL);
+    bool same = real_path && !strcmp(real_path, real_target);
+    free(real_path);
+    free(real_target);
+    return same ? "beide Pfade zeigen auf dieselbe Datei" : NULL;
+}
+
 bool df_file_action(DfAction a, const char *path, const char *target, char **new_path, char *err,
                     size_t errsz)
 {
@@ -292,6 +308,11 @@ bool df_file_action(DfAction a, const char *path, const char *target, char **new
             snprintf(err, errsz, "keine Datei zum Verlinken");
             return false;
         }
+        const char *problem = link_problem(path, target);
+        if (problem) {
+            snprintf(err, errsz, "%s", problem);
+            return false;
+        }
         /* erst neben der Datei anlegen, dann atomar ersetzen: nie ohne Datei */
         char *tmp = g_strdup_printf("%s.df-link-%d", path, (int)getpid());
         int rc;
@@ -309,6 +330,7 @@ bool df_file_action(DfAction a, const char *path, const char *target, char **new
             snprintf(err, errsz, "%s", g_strerror(errno));
             g_unlink(tmp);
         } else {
+            g_unlink(tmp);      /* rename tut nichts, wenn beide schon dieselbe Datei sind */
             ok = true;
             df_db_remove_path(path);
         }

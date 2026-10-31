@@ -1,4 +1,4 @@
-# Duplikat-Finder 1.0.3
+# Duplikat-Finder 1.0.4
 
 Findet doppelte Videos – und auf Wunsch Bilder – anhand ihres **Inhalts**: auch wenn sie
 anders kodiert (H.264 ↔ HEVC ↔ VP9 ↔ AV1), verkleinert, beschnitten, gespiegelt oder mit
@@ -36,7 +36,7 @@ ffmpeg-Bibliotheken von Ubuntu 24.04, Chromaprint) holt `apt` automatisch.
 
 Selbst bauen: `make` bzw. `make deb` (benötigt `build-essential libgtk-3-dev libsqlite3-dev
 libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev
-libchromaprint-dev`).
+libchromaprint-dev`). `make test` prüft die Link-Aktionen und den Suchlauf in einem temporären Ordner.
 
 ## Neue Version veröffentlichen
 

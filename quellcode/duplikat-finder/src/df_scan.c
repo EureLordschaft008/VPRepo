@@ -231,10 +231,19 @@ static void walk_dir(Walk *w, const char *root)
             if (w->o->skip_hidden && name[0] == '.') continue;
             struct stat st;
             if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
-            if (S_ISLNK(st.st_mode)) {
+            bool via_link = S_ISLNK(st.st_mode);
+            if (via_link) {
                 if (w->o->skip_symlinks || fstatat(dfd, name, &st, 0) != 0) continue;
             }
             char *path = g_build_filename(dir, name, NULL);
+            if (via_link && S_ISREG(st.st_mode)) {
+                /* unter dem echten Pfad führen, sonst stünde die Datei als Duplikat neben sich */
+                char *real = realpath(path, NULL);
+                g_free(path);
+                if (!real) continue;
+                path = g_strdup(real);
+                free(real);
+            }
             if (S_ISDIR(st.st_mode)) {
                 char key[48];
                 snprintf(key, sizeof key, "%llx:%llx", (unsigned long long)st.st_dev,

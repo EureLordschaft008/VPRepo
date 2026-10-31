@@ -2,6 +2,7 @@
 #
 #   make                 baut duplikat-finder (GUI), duplikat-finder-cli und den Hilfsprozess
 #   make deb             baut das Paket duplikat-finder_<Version>_<Arch>.deb
+#   make test            Regressionstests der Link-Aktionen und des Suchlaufs
 #   make clean           entfernt Programme und Build-Ordner (Pakete bleiben)
 #   make distclean       entfernt zusätzlich die gebauten .deb-Pakete
 #   sudo make install    installiert nach /usr/local (ohne Paketverwaltung)
@@ -11,8 +12,8 @@
 #     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
 #     libchromaprint-dev
 
-VERSION = 1.0.3
-DEBREV  = 2
+VERSION = 1.0.4
+DEBREV  = 1
 PREFIX ?= /usr/local
 CC     ?= gcc
 CFLAGS ?= -O2 -march=x86-64-v2 -Wall -Wextra
@@ -73,10 +74,17 @@ $(DEB): all LICENSE data/control.in data/duplikat-finder.desktop data/duplikat-f
 		> build/deb/DEBIAN/control
 	dpkg-deb --root-owner-group --build build/deb $@
 
+build/test/test_actions: tests/test_actions.c $(CORE_SRC) $(CORE_HDR)
+	mkdir -p build/test
+	$(CC) $(CFLAGS) -pthread $(CORE_CFLAGS) -o $@ tests/test_actions.c $(CORE_SRC) $(CORE_LIBS) -lm
+
+test: build/test/test_actions duplikat-finder-cli duplikat-finder-worker
+	DF_TEST_CLI="$(CURDIR)/duplikat-finder-cli" build/test/test_actions
+
 clean:
 	rm -rf duplikat-finder duplikat-finder-cli duplikat-finder-worker build
 
 distclean: clean
 	rm -f *.deb
 
-.PHONY: all install uninstall deb clean distclean
+.PHONY: all install uninstall deb test clean distclean
