@@ -160,8 +160,8 @@ oder gleicher Größe. Gestartet wird `duplikat-finder` (Oberfläche) oder `dupl
 
 ## Mediathek Downloader
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb und 3sat,
-von der einzelnen Folge bis zur ganzen Serie mit allen Staffeln. Gestartet wird `mediathek-downloader` (Oberfläche) oder
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
+Netzkino, von der einzelnen Folge bis zur ganzen Serie mit allen Staffeln. Gestartet wird `mediathek-downloader` (Oberfläche) oder
 `mediathek-downloader-cli` (Terminal).
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader. Bestehende Installationen wechseln beim nächsten
