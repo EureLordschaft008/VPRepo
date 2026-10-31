@@ -169,9 +169,11 @@ Update von selbst, Einstellungen, Verlauf und Warteschlange bleiben erhalten.
 
 **Auswählen**
 
-- Die Vorschau läuft über eine, mehrere oder alle Mediatheken. Gleiche Titel erscheinen nur einmal.
+- Die Vorschau läuft über eine, mehrere oder alle Mediatheken. Gleiche Titel erscheinen nur
+  einmal.
 - Die Vorschau zeigt neue Filme und Serien als Kacheln mit Titelbild, gefiltert nach Kategorien wie
-  Komödie, Drama oder Krimi und nach Sprache. Die Kategorien stammen auch von IMDb. Häkchen sammeln eine Auswahl, „Herunterladen“ startet alles auf einmal.
+  Komödie, Drama oder Krimi und nach Sprache. Die Kategorien stammen auch von IMDb.
+  Häkchen sammeln eine Auswahl, „Herunterladen“ startet alles auf einmal.
 - Ruht die Maus auf einer Kachel, zeigt ein Popup FSK, Länge, Datum, IMDb-Bewertung und Beschreibung.
 - Die Detailansicht zeigt zusätzlich Staffeln und Folgen, der IMDb-Knopf öffnet die passende Seite
   im Browser.
