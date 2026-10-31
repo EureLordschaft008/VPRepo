@@ -28,6 +28,14 @@ sudo apt update
 sudo apt install av1-converter intro-cutter duplikat-finder mediathek-downloader
 ```
 
+Wer den Signaturschlüssel prüfen möchte, lässt sich seinen Fingerabdruck anzeigen:
+
+```bash
+gpg --show-keys --with-fingerprint /etc/apt/keyrings/vprepo.gpg
+```
+
+Er muss `540C 85C8 FE79 B6FD DB00  0A1A 70FA 1784 ED56 CD40` lauten.
+
 Neue Versionen erscheinen danach automatisch in der Aktualisierungsverwaltung von Linux Mint
 (unter Ubuntu in der Aktualisierungsverwaltung bzw. bei `sudo apt upgrade`). Die Programme stehen
 im Anwendungsmenü unter „Sound & Video“.

@@ -21,6 +21,10 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 ## Intro-Cutter
 
+### Noch ohne neues Paket
+- Das Vorschaubild entsteht in einer sicher angelegten Temp-Datei statt unter einem vorhersagbaren
+  Namen in `/tmp`.
+
 ### 5.6.0-3 (31.10.2026)
 - Text im Über-Dialog geändert.
 - Lizenz GPL-3.0-or-later.
@@ -42,6 +46,10 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 ### Noch ohne neues Paket
 - Lizenz GPL-3.0-or-later.
+- Ist „Symbolische Links nicht verfolgen“ aus, erscheint eine verlinkte Datei unter ihrem echten
+  Pfad und nicht mehr als Duplikat ihrer selbst.
+- Hardlink- und Symlink-Aktionen ersetzen eine Datei nicht mehr, wenn das Ziel fehlt oder auf sie
+  selbst zeigt, und lassen keine `.df-link-*`-Datei mehr liegen.
 
 ### 1.0.3-2 (31.10.2026)
 - Neue Versionen werden automatisch gebaut und kommen über die Paketquelle.
@@ -57,6 +65,12 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
 ### Noch ohne neues Paket
+- Adressen aus Antworten der Mediatheken werden geprüft, curl nutzt nur noch HTTP und HTTPS.
+- Sehr lange Serien- und Folgentitel führen nicht mehr zu einem zu langen Dateinamen.
+- Der Lizenztext liegt dem Paket bei.
+
+### 1.6.1 (31.10.2026)
+- Änderungen an Encoder und Qualität gelten sofort für alle offenen Aufträge.
 - Lizenz GPL-3.0-or-later.
 
 ### 1.6.0 (31.10.2026)

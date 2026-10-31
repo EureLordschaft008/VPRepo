@@ -17,6 +17,7 @@ printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
 cd "$out"
 apt-ftparchive --arch amd64 packages pool > dists/stable/main/binary-amd64/Packages
 gzip -9kn dists/stable/main/binary-amd64/Packages
+# Release entsteht außerhalb von dists/stable, sonst listet es sich selbst mit falscher Größe
 apt-ftparchive \
     -o APT::FTPArchive::Release::Origin=VPRepo \
     -o APT::FTPArchive::Release::Label=VPRepo \
@@ -24,6 +25,7 @@ apt-ftparchive \
     -o APT::FTPArchive::Release::Codename=stable \
     -o APT::FTPArchive::Release::Architectures=amd64 \
     -o APT::FTPArchive::Release::Components=main \
-    release dists/stable > dists/stable/Release
+    release dists/stable > "$GNUPGHOME/Release"
+mv "$GNUPGHOME/Release" dists/stable/Release
 gpg --batch --yes --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
 gpg --batch --yes --clearsign -o dists/stable/InRelease dists/stable/Release
