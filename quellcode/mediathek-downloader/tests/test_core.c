@@ -1,0 +1,326 @@
+/*
+ * Mediathek Downloader – Regressionstests der Engine
+ * ==================================================
+ * Bindet md_core.c direkt ein, um an die statischen Funktionen zu kommen. Downloads laufen
+ * über einen kleinen HTTP-Server auf 127.0.0.1 in diesem Programm, alle Dateien in einem
+ * temporären Ordner (test_util.h). Aufruf: make test
+ */
+#include "../src/md_core.c"
+
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include "test_util.h"
+
+#define BODY_SIZE (256 * 1024)
+#define RESUME_AT 100000
+#define CURL_TIMEOUT_MS 30000
+
+static const char *const GOOD_URLS[] = {
+    "https://example.org/film.mp4", "http://example.org/a/b.mp4?x=1&y=2",
+};
+static const char *const BAD_URLS[] = {
+    "-K/pfad", "--output=/tmp/x", "file:///etc/passwd", "gopher://example.org/",
+    "ftp://example.org/film.mp4", "javascript:alert(1)", "httpx://example.org/", "http:/example.org/",
+    " https://example.org/",
+};
+static const struct {
+    const char *key;
+    size_t offset;
+} URL_FIELDS[] = {
+    {"url_video_hd", G_STRUCT_OFFSET(MdTitle, url_high)},
+    {"url_video", G_STRUCT_OFFSET(MdTitle, url_medium)},
+    {"url_video_low", G_STRUCT_OFFSET(MdTitle, url_low)},
+    {"url_subtitle", G_STRUCT_OFFSET(MdTitle, url_subtitle)},
+    {"url_website", G_STRUCT_OFFSET(MdTitle, website)},
+};
+#define URL_FIELD(t, i) G_STRUCT_MEMBER(char *, t, URL_FIELDS[i].offset)
+
+/* ---------------------------------------------------------------------------
+ * HTTP-Server: liefert body, auf Wunsch ab einer Byte-Position
+ * ------------------------------------------------------------------------- */
+static guint8 body[BODY_SIZE];
+static int server_fd, server_port;
+static gint last_range = -1;    /* Startposition der letzten Anfrage, -1 = ohne Range */
+
+static void send_all(int fd, const void *data, size_t size)
+{
+    const char *p = data;
+    while (size > 0) {
+        ssize_t sent = send(fd, p, size, MSG_NOSIGNAL);
+        if (sent <= 0) return;
+        p += sent;
+        size -= (size_t)sent;
+    }
+}
+
+static void serve_client(int client)
+{
+    char request[4096];
+    size_t have = 0;
+    while (have < sizeof request - 1 && !g_strstr_len(request, (gssize)have, "\r\n\r\n")) {
+        ssize_t got = recv(client, request + have, sizeof request - 1 - have, 0);
+        if (got <= 0) return;
+        have += (size_t)got;
+    }
+    request[have] = 0;
+    const char *range = strcasestr(request, "\r\nRange: bytes=");
+    int start = range ? atoi(range + strlen("\r\nRange: bytes=")) : 0;
+    g_atomic_int_set(&last_range, range ? start : -1);
+    char *head = range
+        ? g_strdup_printf("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes %d-%d/%d\r\n"
+                          "Content-Length: %d\r\nConnection: close\r\n\r\n",
+                          start, BODY_SIZE - 1, BODY_SIZE, BODY_SIZE - start)
+        : g_strdup_printf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
+                          BODY_SIZE);
+    send_all(client, head, strlen(head));
+    g_free(head);
+    if (!strncmp(request, "GET ", 4)) send_all(client, body + start, (size_t)(BODY_SIZE - start));
+}
+
+static gpointer server_thread(gpointer data)
+{
+    (void)data;
+    for (;;) {
+        int client = accept(server_fd, NULL, NULL);
+        if (client < 0) return NULL;
+        serve_client(client);
+        close(client);
+    }
+}
+
+static GThread *server_start(void)
+{
+    for (int i = 0; i < BODY_SIZE; i++) body[i] = (guint8)(i * 31 + (i >> 8));
+    server_fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t size = sizeof address;
+    if (server_fd < 0 || bind(server_fd, (struct sockaddr *)&address, size) != 0 ||
+        listen(server_fd, 8) != 0 || getsockname(server_fd, (struct sockaddr *)&address, &size) != 0)
+        g_error("Testserver startet nicht: %s", g_strerror(errno));
+    server_port = ntohs(address.sin_port);
+    return g_thread_new("testserver", server_thread, NULL);
+}
+
+static void server_stop(GThread *thread)
+{
+    shutdown(server_fd, SHUT_RDWR);
+    close(server_fd);
+    g_thread_join(thread);
+}
+
+/* ---------------------------------------------------------------------------
+ * Helfer
+ * ------------------------------------------------------------------------- */
+static char *test_path(const char *name)
+{
+    return g_build_filename(test_dir, name, NULL);
+}
+
+static char *server_url(const char *name)
+{
+    return g_strdup_printf("http://127.0.0.1:%d/%s", server_port, name);
+}
+
+/* Auf curl warten -> Exit-Code, -1 = lief zu lange oder wurde beendet */
+static int wait_curl(pid_t pid)
+{
+    g_assert_cmpint(pid, >, 0);
+    for (int waited = 0; waited < CURL_TIMEOUT_MS; waited += 10) {
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        g_usleep(10 * 1000);
+    }
+    stop_child(pid);
+    return -1;
+}
+
+static void assert_file_is_body(const char *path)
+{
+    char *data = NULL;
+    gsize size = 0;
+    g_assert_true(g_file_get_contents(path, &data, &size, NULL));
+    g_assert_cmpmem(data, size, body, BODY_SIZE);
+    g_free(data);
+}
+
+/* Text in dieser Form so oft wiederholen, dass mindestens bytes Bytes zusammenkommen */
+static char *repeated(const char *start, const char *unit, size_t bytes)
+{
+    GString *text = g_string_new(start);
+    while (text->len < bytes) g_string_append(text, unit);
+    return g_string_free(text, FALSE);
+}
+
+/* ---------------------------------------------------------------------------
+ * Adressen aus der Antwort der Suche
+ * ------------------------------------------------------------------------- */
+static MdTitle *read_title(const char *key, const char *url)
+{
+    GString *text = g_string_new("{\"channel\":\"ZDF\",\"topic\":\"Krimi\",\"title\":\"Der Fall\"");
+    for (size_t i = 0; i < G_N_ELEMENTS(URL_FIELDS); i++)
+        g_string_append_printf(text, ",\"%s\":\"%s\"", URL_FIELDS[i].key,
+                               !strcmp(URL_FIELDS[i].key, key) ? url : GOOD_URLS[0]);
+    g_string_append_c(text, '}');
+    Json j = {text->str, true};
+    MdTitle *t = json_read_title(&j);
+    g_assert_true(j.ok);
+    g_string_free(text, TRUE);
+    return t;
+}
+
+static void test_url_foreign_dropped(void)
+{
+    for (size_t f = 0; f < G_N_ELEMENTS(URL_FIELDS); f++)
+        for (size_t u = 0; u < G_N_ELEMENTS(BAD_URLS); u++) {
+            MdTitle *t = read_title(URL_FIELDS[f].key, BAD_URLS[u]);
+            g_assert_cmpstr(URL_FIELD(t, f), ==, "");
+            for (size_t other = 0; other < G_N_ELEMENTS(URL_FIELDS); other++)
+                if (other != f) g_assert_cmpstr(URL_FIELD(t, other), ==, GOOD_URLS[0]);
+            md_title_free(t);
+        }
+}
+
+static void test_url_web_kept(void)
+{
+    for (size_t f = 0; f < G_N_ELEMENTS(URL_FIELDS); f++)
+        for (size_t u = 0; u < G_N_ELEMENTS(GOOD_URLS); u++) {
+            MdTitle *t = read_title(URL_FIELDS[f].key, GOOD_URLS[u]);
+            g_assert_cmpstr(URL_FIELD(t, f), ==, GOOD_URLS[u]);
+            md_title_free(t);
+        }
+}
+
+/* ---------------------------------------------------------------------------
+ * start_curl
+ * ------------------------------------------------------------------------- */
+/* Die zweite Adresse bekommt das -o aus der Datei, weil das -o von start_curl die erste nimmt */
+static void test_curl_option_in_url(void)
+{
+    char *config = test_path("angriff.conf"), *foreign = test_path("fremder-pfad");
+    char *part = test_path("option.part"), *url = server_url("film.mp4");
+    char *argument = g_strconcat("-K", config, NULL);
+    char *text = g_strdup_printf("url = \"%s\"\nurl = \"%s\"\noutput = \"%s\"\n", url, url, foreign);
+    g_assert_true(g_file_set_contents(config, text, -1, NULL));
+    g_assert_cmpint(wait_curl(start_curl(argument, part, 0)), !=, 0);
+    g_assert_false(g_file_test(foreign, G_FILE_TEST_EXISTS));
+    g_assert_false(g_file_test(part, G_FILE_TEST_EXISTS));
+    g_free(config);
+    g_free(foreign);
+    g_free(part);
+    g_free(url);
+    g_free(argument);
+    g_free(text);
+}
+
+static void test_curl_file_scheme(void)
+{
+    char *secret = test_path("geheim"), *part = test_path("datei.part");
+    char *url = g_strconcat("file://", secret, NULL);
+    g_assert_true(g_file_set_contents(secret, "geheim", -1, NULL));
+    g_assert_cmpint(wait_curl(start_curl(url, part, 0)), !=, 0);
+    g_assert_false(g_file_test(part, G_FILE_TEST_EXISTS));
+    g_free(secret);
+    g_free(part);
+    g_free(url);
+}
+
+static void test_curl_download(void)
+{
+    char *part = test_path("ganz.part"), *url = server_url("film.mp4");
+    g_assert_cmpint(wait_curl(start_curl(url, part, 0)), ==, 0);
+    g_assert_cmpint(g_atomic_int_get(&last_range), ==, -1);
+    assert_file_is_body(part);
+    g_free(part);
+    g_free(url);
+}
+
+static void test_curl_resume(void)
+{
+    char *part = test_path("halb.part"), *url = server_url("film.mp4");
+    g_assert_true(g_file_set_contents(part, (const char *)body, RESUME_AT, NULL));
+    g_assert_cmpint(wait_curl(start_curl(url, part, 100 * 1024 * 1024)), ==, 0);
+    g_assert_cmpint(g_atomic_int_get(&last_range), ==, RESUME_AT);
+    assert_file_is_body(part);
+    g_free(part);
+    g_free(url);
+}
+
+/* ---------------------------------------------------------------------------
+ * md_target_path
+ * ------------------------------------------------------------------------- */
+static void assert_file_name_fits(const MdTitle *t)
+{
+    char *path = md_target_path(t, "/ziel"), *file = g_path_get_basename(path);
+    g_assert_cmpuint(strlen(file), <=, 230);
+    g_assert_true(g_utf8_validate(file, -1, NULL));
+    g_assert_true(g_str_has_suffix(file, ".mp4"));
+    g_free(path);
+    g_free(file);
+}
+
+/* Die Vorsilben verschieben den Schnitt, damit er auch mitten in ein Zeichen fallen würde */
+static void test_path_long_names(void)
+{
+    static const char *const STARTS[] = {"", "x", "xx", "xxx"};
+    static const char *const UNITS[] = {"ü", "€", "😀"};
+    for (size_t s = 0; s < G_N_ELEMENTS(STARTS); s++)
+        for (size_t u = 0; u < G_N_ELEMENTS(UNITS); u++) {
+            MdTitle t = {.season = 2, .episode = 7};
+            t.topic = repeated(STARTS[s], UNITS[u], 400);
+            t.name = repeated(STARTS[s], UNITS[u], 400);
+            assert_file_name_fits(&t);
+            g_free(t.topic);
+            t.topic = repeated("", "S", 400);
+            assert_file_name_fits(&t);
+            g_free(t.topic);
+            t.topic = g_strdup("Kurz");
+            assert_file_name_fits(&t);
+            g_free(t.topic);
+            g_free(t.name);
+        }
+}
+
+static void test_path_short_names(void)
+{
+    MdTitle t = {.topic = "Tatort", .name = "Der Fall", .season = 3, .episode = 7};
+    char *path = md_target_path(&t, "/ziel");
+    g_assert_cmpstr(path, ==, "/ziel/Serien/Tatort/Staffel 03/Tatort - S03E07 - Der Fall.mp4");
+    g_free(path);
+    MdTitle film = {.topic = "Spielfilm", .name = "Der Fall", .season = -1, .is_film = true};
+    path = md_target_path(&film, "/ziel");
+    g_assert_cmpstr(path, ==, "/ziel/Filme/Der Fall.mp4");
+    g_free(path);
+    /* 34 + " - S01E02 - " + 180 + ".mp4": genau 230 Byte bleiben unverändert */
+    char *topic = repeated("", "t", 34), *name = repeated("", "n", 180);
+    MdTitle full = {.topic = topic, .name = name, .season = 1, .episode = 2};
+    path = md_target_path(&full, "/ziel");
+    char *file = g_path_get_basename(path);
+    g_assert_cmpuint(strlen(file), ==, 230);
+    g_assert_nonnull(strstr(file, name));
+    g_free(path);
+    g_free(file);
+    g_free(topic);
+    g_free(name);
+}
+
+int main(int argc, char **argv)
+{
+    test_dir_create();
+    g_test_init(&argc, &argv, NULL);
+    g_test_set_nonfatal_assertions();
+    g_test_add_func("/adressen/fremde-werden-geleert", test_url_foreign_dropped);
+    g_test_add_func("/adressen/webadressen-bleiben", test_url_web_kept);
+    g_test_add_func("/curl/option-als-adresse", test_curl_option_in_url);
+    g_test_add_func("/curl/file-abgelehnt", test_curl_file_scheme);
+    g_test_add_func("/curl/download", test_curl_download);
+    g_test_add_func("/curl/fortsetzen", test_curl_resume);
+    g_test_add_func("/pfad/lange-namen", test_path_long_names);
+    g_test_add_func("/pfad/kurze-namen", test_path_short_names);
+    GThread *server = server_start();
+    int result = g_test_run();
+    server_stop(server);
+    test_dir_remove();
+    return result;
+}

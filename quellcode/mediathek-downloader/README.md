@@ -1,4 +1,4 @@
-# Mediathek Downloader 1.6.1
+# Mediathek Downloader 1.6.2
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
 Netzkino –
@@ -20,7 +20,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.6.1-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.6.2-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -174,6 +174,10 @@ Gebraucht werden `gcc`, `make`, `libgtk-3-dev` und `dpkg-deb`.
 ```bash
 make deb
 ```
+
+`make test` führt die Regressionstests und einen kurzen Fuzz-Lauf aus. Die Tests brauchen `curl` und
+legen alles in einem temporären Ordner ab. `make test ASAN=1` nimmt AddressSanitizer dazu. Das geht
+nur, wenn `/etc/ld.so.preload` nichts vorlädt.
 
 | Datei | Aufgabe |
 |---|---|

@@ -62,6 +62,9 @@
  * ------------------------------------------------------------------------- */
 #define API_URL "https://mediathekviewweb.de/api/query"
 #define USER_AGENT "mediathek-downloader/" MD_VERSION
+/* curl nur für Webadressen, auch bei Weiterleitungen. Adressen aus fremden Antworten stehen hinter
+ * --url, damit keine als Option gilt. */
+#define CURL_CMD "curl", "--proto", "=http,https", "--proto-redir", "=http,https"
 #define COVER_PAGE_PREFIX "https://www.zdf.de/"
 #define COVER_URL_PREFIX "https://www.zdf.de/assets/"
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
@@ -93,6 +96,7 @@
 #define RETRY_WAIT_MS 5000
 #define MIN_FREE_SPACE (512 * 1024 * 1024LL)    /* Reserve auf dem Ziellaufwerk */
 #define NAME_MAX_BYTES 180
+#define FILE_MAX_BYTES 230          /* Reserve zu 255 für .part und die versteckten Temp-Namen */
 #define ENCODER_NICE 5
 #define SVT_PRESET "6"
 #define GOP_FRAMES "500"            /* Keyframe alle 10 s bei 50 Bildern/s */
@@ -543,6 +547,12 @@ const char *md_source_label(int source)
     return "";
 }
 
+/* Nur Webadressen: Sie stammen aus fremden Antworten und gehen an curl, ffmpeg und den Browser */
+static bool url_allowed(const char *url)
+{
+    return g_str_has_prefix(url, "https://") || g_str_has_prefix(url, "http://");
+}
+
 /* Staffel, Folge und bereinigten Namen aus dem Titel ableiten */
 static void title_analyse(MdTitle *t)
 {
@@ -559,7 +569,9 @@ static void title_analyse(MdTitle *t)
     /* Streams lassen sich nicht wie Dateien laden */
     char **urls[] = {&t->url_high, &t->url_medium, &t->url_low};
     for (size_t i = 0; i < G_N_ELEMENTS(urls); i++)
-        if (g_str_has_suffix(*urls[i], ".m3u8")) **urls[i] = 0;
+        if (g_str_has_suffix(*urls[i], ".m3u8") || !url_allowed(*urls[i])) **urls[i] = 0;
+    if (!url_allowed(t->url_subtitle)) *t->url_subtitle = 0;
+    if (!url_allowed(t->website)) *t->website = 0;
     t->season = t->episode = -1;
     GMatchInfo *match = NULL;
     if (g_regex_match(episode_tag, t->title, 0, &match)) {
@@ -778,7 +790,7 @@ static bool fetch_page(const char *channel, const char *text, const char *field,
                            "\"future\":false,\"offset\":%d,\"size\":%d", offset, PAGE_SIZE);
     if (min_seconds > 0) g_string_append_printf(body, ",\"duration_min\":%d", min_seconds);
     g_string_append_c(body, '}');
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-H",
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-H",
                     "Content-Type: text/plain", "--data-binary", body->str, API_URL, NULL};
     char *reply = NULL, *messages = NULL;
     /* Antworten für die Vorschau werden aufgehoben, damit der Start ohne Netz auskommt */
@@ -1121,7 +1133,7 @@ static void netzkino_fetch(const MdQuery *query, GPtrArray *out)
     for (size_t i = 0; i < G_N_ELEMENTS(NETZKINO_CATEGORIES); i++) {
         char *url = g_strdup_printf(NETZKINO_API "%d.json?d=www&l=de-DE", NETZKINO_CATEGORIES[i]);
         char *saved = search_cache_path(url), *reply = NULL, *messages = NULL;
-        char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, url, NULL};
+        char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, url, NULL};
         if (query->cache == MD_CACHE_REFRESH || !search_cache_read(saved, &reply)) {
             if (run_capture(argv, &reply, &messages) == 0 && reply)
                 g_file_set_contents(saved, reply, -1, NULL);
@@ -1214,6 +1226,15 @@ gint64 md_title_estimate(const MdTitle *t, MdQuality quality)
 /* ---------------------------------------------------------------------------
  * Pfade
  * ------------------------------------------------------------------------- */
+/* Text auf höchstens max Bytes kürzen, ohne ein UTF-8-Zeichen zu zerteilen */
+static void cut_name(char *name, size_t max)
+{
+    if (strlen(name) <= max) return;
+    const char *end = g_utf8_find_prev_char(name, name + max + 1);
+    name[end ? (size_t)(end - name) : max] = 0;
+    g_strchomp(name);
+}
+
 /* Text als Datei- oder Ordnernamen nutzbar machen */
 static char *safe_name(const char *text)
 {
@@ -1227,11 +1248,7 @@ static char *safe_name(const char *text)
     while (*name == '.') memmove(name, name + 1, strlen(name));
     size_t length = strlen(name);
     while (length && (name[length - 1] == '.' || name[length - 1] == ' ')) name[--length] = 0;
-    if (length > NAME_MAX_BYTES) {
-        const char *end = g_utf8_find_prev_char(name, name + NAME_MAX_BYTES + 1);
-        name[end ? end - name : NAME_MAX_BYTES] = 0;
-        g_strchomp(name);
-    }
+    cut_name(name, NAME_MAX_BYTES);
     if (!*name) {
         g_free(name);
         return g_strdup("Unbenannt");
@@ -1244,8 +1261,12 @@ char *md_target_path(const MdTitle *t, const char *dir)
     char *topic = safe_name(t->topic), *name = safe_name(t->name), *file, *path;
     if (t->season >= 0) {
         char *season = g_strdup_printf("Staffel %02d", t->season);
-        file = g_strdup_printf("%s - S%02dE%02d - %s.mp4", topic, t->season, t->episode, name);
+        char *head = g_strdup_printf("%s - S%02dE%02d - ", topic, t->season, t->episode);
+        /* Sendung und Folge sind einzeln begrenzt, zusammen wären sie zu lang für einen Namen */
+        cut_name(name, FILE_MAX_BYTES - strlen(head) - strlen(".mp4"));
+        file = g_strconcat(head, name, ".mp4", NULL);
         path = g_build_filename(dir, "Serien", topic, season, file, NULL);
+        g_free(head);
         g_free(season);
     } else if (t->is_film) {
         file = g_strconcat(name, ".mp4", NULL);
@@ -1682,8 +1703,8 @@ static char *page_info(const char *website)
         return info;
     }
     char *address = page_address(website);
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "--retry", "2", "-A", USER_AGENT,
-                    "-w", "\n%{http_code}", address, NULL};
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "20", "--retry", "2", "-A", USER_AGENT,
+                    "-w", "\n%{http_code}", "--url", address, NULL};
     char *reply = NULL, *messages = NULL;
     int rc = run_capture(argv, &reply, &messages);
     g_free(address);
@@ -1777,6 +1798,7 @@ char *md_default_cover_dir(void)
 /* Die Seite nennt kein Bild: Standbild aus dem Video holen */
 static void cover_from_video(const char *video, const char *path)
 {
+    if (!url_allowed(video)) return;
     char *tmp = g_strconcat(path, ".part", NULL);
     char *argv[] = {"ffmpeg", "-nostdin", "-v", "error", "-rw_timeout", "20000000",
                     "-ss", COVER_FRAME_SECONDS, "-i", (char *)video, "-frames:v", "1",
@@ -1794,8 +1816,8 @@ char *md_cover_file(const char *website, const char *video)
     if (file_size(path) <= 0 && info && *info != '\n') {
         *strchr(info, '\n') = 0;
         char *tmp = g_strconcat(path, ".part", NULL), *messages = NULL;
-        char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp, info,
-                        NULL};
+        char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp,
+                        "--url", info, NULL};
         if (run_capture(argv, NULL, &messages) != 0 || g_rename(tmp, path) != 0) g_unlink(tmp);
         g_free(messages);
         g_free(tmp);
@@ -1906,7 +1928,7 @@ static char *imdb_lookup(const char *name, bool is_film, int *year)
     char *lower = g_utf8_strdown(query, -1);
     char *escaped = g_uri_escape_string(lower, NULL, FALSE);
     char *api = g_strdup_printf(IMDB_API "%s.json?includeVideos=0", escaped);
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "15", "-A", USER_AGENT, api, NULL};
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "15", "-A", USER_AGENT, api, NULL};
     char *reply = NULL, *messages = NULL, *id = NULL;
     if (run_capture(argv, &reply, &messages) == 0 && reply) {
         id = imdb_pick(reply, name, is_film, year);
@@ -1946,7 +1968,7 @@ static char *imdb_ratings_file(void)
     GStatBuf stat_buf;
     g_mutex_lock(&lock);
     if (g_stat(path, &stat_buf) != 0 || time(NULL) - stat_buf.st_mtime >= IMDB_RATINGS_SECONDS) {
-        char *fetch[] = {"curl", "-sS", "-f", "-L", "-m", "120", "-A", USER_AGENT, "-o", packed,
+        char *fetch[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "120", "-A", USER_AGENT, "-o", packed,
                          IMDB_RATINGS_URL, NULL};
         char *unpack[] = {"gzip", "-df", packed, NULL};
         char *messages = NULL, *more = NULL;
@@ -1981,7 +2003,7 @@ static char *imdb_genres_file(void)
     g_mutex_lock(&lock);
     if (!failed &&
         (g_stat(path, &stat_buf) != 0 || time(NULL) - stat_buf.st_mtime >= IMDB_GENRES_SECONDS)) {
-        char *fetch[] = {"curl", "-sS", "-f", "-L", "-m", "1800", "-A", USER_AGENT, "-o", packed,
+        char *fetch[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "1800", "-A", USER_AGENT, "-o", packed,
                          IMDB_GENRES_URL, NULL};
         char *unpack[] = {"sh", "-c", (char *)SCRIPT, "sh", packed, plain, NULL};
         char *messages = NULL, *more = NULL;
@@ -2325,7 +2347,7 @@ static bool rate_changed(gint64 running, gint64 wanted)
 /* Größe der Datei beim Server erfragen -> Bytes, 0 = Fehler (*error gesetzt) */
 static gint64 remote_size(const char *url, char **error)
 {
-    char *argv[] = {"curl", "-sSIL", "-m", "30", "-A", USER_AGENT, (char *)url, NULL};
+    char *argv[] = {CURL_CMD, "-sSIL", "-m", "30", "-A", USER_AGENT, "--url", (char *)url, NULL};
     char *out = NULL, *messages = NULL;
     int rc = run_capture(argv, &out, &messages);
     int status = 0;
@@ -2360,7 +2382,7 @@ static pid_t start_curl(const char *url, const char *part, gint64 rate)
     char *rate_text = g_strdup_printf("%" G_GINT64_FORMAT, rate);
     char *argv[32];
     int n = 0;
-    char *fixed[] = {"curl", "-sS", "-f", "-L", "-C", "-", "--connect-timeout", "20",
+    char *fixed[] = {CURL_CMD, "-sS", "-f", "-L", "-C", "-", "--connect-timeout", "20",
                      "--speed-limit", "1024", "--speed-time", "60", "-A", USER_AGENT, NULL};
     for (int i = 0; fixed[i]; i++) argv[n++] = fixed[i];
     if (rate > 0) {
@@ -2369,6 +2391,7 @@ static pid_t start_curl(const char *url, const char *part, gint64 rate)
     }
     argv[n++] = "-o";
     argv[n++] = (char *)part;
+    argv[n++] = "--url";
     argv[n++] = (char *)url;
     argv[n] = NULL;
     GPid pid = 0;
@@ -2504,8 +2527,8 @@ static bool download_file(Job *j, const char *url, const char *path, gint64 size
 static void download_subtitle(Job *j, const Extra *e, const char *path)
 {
     char *part = g_strconcat(path, ".part", NULL);
-    char *argv[] = {"curl", "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-o", part,
-                    e->url, NULL};
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "-o", part,
+                    "--url", e->url, NULL};
     if (run_capture(argv, NULL, NULL) == 0) g_rename(part, path);
     else md_log("Untertitel nicht verfügbar: %s (%s)", j->title, e->url);
     g_unlink(part);
