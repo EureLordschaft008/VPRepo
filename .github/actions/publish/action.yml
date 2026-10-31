@@ -1,0 +1,42 @@
+name: In VPRepo veröffentlichen
+description: Legt das gebaute .deb aus dem Arbeitsordner in VPRepo ab
+inputs:
+  deploy-key:
+    description: Privater Deploy-Key mit Schreibrecht auf VPRepo
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DEPLOY_KEY: ${{ inputs.deploy-key }}
+      run: |
+        set -euo pipefail
+        key=$(mktemp)
+        trap 'rm -f "$key"' EXIT
+        printf '%s\n' "$DEPLOY_KEY" > "$key"
+        export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+        deb=$(ls ./*.deb)
+        pkg=$(dpkg-deb -f "$deb" Package)
+        repo=$(mktemp -d)
+        git clone --depth 1 git@github.com:EureLordschaft008/VPRepo.git "$repo"
+        target="pool/main/$pkg/$(basename "$deb")"
+        if [ -e "$repo/$target" ]; then
+          echo "::error::$target ist schon veröffentlicht"
+          exit 1
+        fi
+        mkdir -p "$repo/pool/main/$pkg"
+        cp "$deb" "$repo/$target"
+
+        cd "$repo"
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add "$target"
+        git commit -m "$(basename "$deb")"
+        for attempt in 1 2 3 4 5; do
+          git pull --rebase origin main && git push origin main && exit 0
+          sleep $((attempt * 5))
+        done
+        echo '::error::Push nach VPRepo fehlgeschlagen'
+        exit 1
