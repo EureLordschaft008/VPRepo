@@ -719,6 +719,7 @@ static void apply_queue_settings(void)
     md_set_rate_limit(ui.cfg.limit_on ? (gint64)(ui.cfg.limit_mb * 1e6) : 0);
     md_set_parallel(ui.cfg.parallel, ui.cfg.conversions);
     md_set_cover_dir(ui.cfg.cache_dir);
+    md_set_encoder((MdEncoder)ui.cfg.encoder, ui.cfg.gpu_quality, ui.cfg.cpu_rf);
 }
 
 /* ---------------------------------------------------------------------------

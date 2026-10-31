@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.6.0"
+#define MD_VERSION "1.6.1"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -174,6 +174,8 @@ void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dat
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
 void md_set_rate_limit(gint64 bytes_per_second);    /* 0 = unbegrenzt, gilt sofort */
 void md_set_parallel(int downloads, int conversions);
+/* Encoder für alle offenen Aufträge; eine laufende Umwandlung bleibt, wie sie ist */
+void md_set_encoder(MdEncoder encoder, int gpu_quality, int cpu_rf);
 
 /* --- Verlauf: was schon geladen ist ------------------------------------- */
 /* Prüft Warteschlange, Verlauf und den Ordner dir. path (darf NULL sein): Datei, falls da.

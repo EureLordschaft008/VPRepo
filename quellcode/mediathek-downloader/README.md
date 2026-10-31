@@ -1,4 +1,4 @@
-# Mediathek Downloader 1.6.0
+# Mediathek Downloader 1.6.1
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
 Netzkino –
@@ -20,7 +20,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.6.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.6.1-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
@@ -116,7 +116,8 @@ der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 | Tempo | sehr schnell | sehr viel langsamer |
 | Ton, Untertitel | unverändert | unverändert |
 
-Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt die MP4-Datei.
+Änderungen an Encoder und Qualität gelten sofort für alle offenen Aufträge, nur eine laufende
+Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt die CPU. Wird das Ergebnis nicht kleiner, bleibt die MP4-Datei.
 
 ## Grenzen
 

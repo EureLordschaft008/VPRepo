@@ -3221,6 +3221,22 @@ void md_set_rate_limit(gint64 bytes_per_second)
     g_mutex_unlock(&q.lock);
 }
 
+void md_set_encoder(MdEncoder encoder, int gpu_quality, int cpu_rf)
+{
+    g_mutex_lock(&q.lock);
+    bool changed = false;
+    for (guint i = 0; i < q.jobs->len; i++) {
+        Job *j = q.jobs->pdata[i];
+        if (j->state == MD_JOB_CONVERTING || j->state == MD_JOB_DONE) continue;
+        changed |= j->encoder != encoder || j->gpu_quality != gpu_quality || j->cpu_rf != cpu_rf;
+        j->encoder = encoder;
+        j->gpu_quality = gpu_quality;
+        j->cpu_rf = cpu_rf;
+    }
+    if (changed) queue_save();
+    g_mutex_unlock(&q.lock);
+}
+
 void md_set_parallel(int downloads, int conversions)
 {
     g_mutex_lock(&q.lock);
