@@ -8,7 +8,7 @@ Videosammlungen:
 | [AV1-Converter](#av1-converter) | `av1-converter` | Videos nach AV1 umwandeln und Speicherplatz sparen |
 | [Intro-Cutter](#intro-cutter) | `intro-cutter` | Wiederkehrende Intros und Outros erkennen und herausschneiden |
 | [Duplikat-Finder](#duplikat-finder) | `duplikat-finder` | Doppelte Videos und Bilder anhand des Inhalts finden |
-| [Mediathek Downloader](#mediathek-downloader) | `mediathek-downloader` | Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat laden |
+| [Mediathek Downloader](#mediathek-downloader) | `mediathek-downloader` | Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren Sendern laden |
 
 Alle vier sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
 Terminal-Version. Dieses Repository enthält nur die fertigen Pakete, der Quellcode liegt nicht
@@ -160,8 +160,8 @@ oder gleicher Größe. Gestartet wird `duplikat-finder` (Oberfläche) oder `dupl
 
 ## Mediathek Downloader
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat, von der einzelnen Folge bis zur
-ganzen Serie mit allen Staffeln. Gestartet wird `mediathek-downloader` (Oberfläche) oder
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb und 3sat,
+von der einzelnen Folge bis zur ganzen Serie mit allen Staffeln. Gestartet wird `mediathek-downloader` (Oberfläche) oder
 `mediathek-downloader-cli` (Terminal).
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader. Bestehende Installationen wechseln beim nächsten
@@ -180,6 +180,7 @@ Update von selbst, Einstellungen, Verlauf und Warteschlange bleiben erhalten.
 - Bilder und Informationen bleiben im Zwischenspeicher und werden nicht neu geladen.
 - Jede Folge zeigt, ob sie geladen, angefangen oder noch offen ist. Serien wählen nur aus, was fehlt.
 - Die Bibliothek listet alles Geladene nach Sendung.
+- Die Seite „Neue Folgen“ zeigt, was bei geladenen Serien seit dem letzten Download dazukam.
 
 **Laden**
 
