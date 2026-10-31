@@ -8,7 +8,7 @@ Videosammlungen:
 | [AV1-Converter](#av1-converter) | `av1-converter` | Videos nach AV1 umwandeln und Speicherplatz sparen |
 | [Intro-Cutter](#intro-cutter) | `intro-cutter` | Wiederkehrende Intros und Outros erkennen und herausschneiden |
 | [Duplikat-Finder](#duplikat-finder) | `duplikat-finder` | Doppelte Videos und Bilder anhand des Inhalts finden |
-| [ZDF-Downloader](#zdf-downloader) | `zdf-downloader` | Filme und Serien aus der ZDF-Mediathek laden |
+| [Mediathek Downloader](#mediathek-downloader) | `mediathek-downloader` | Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat laden |
 
 Alle vier sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
 Terminal-Version. Dieses Repository enthält nur die fertigen Pakete, der Quellcode liegt nicht
@@ -23,7 +23,7 @@ sudo install -d -m 755 /etc/apt/keyrings
 curl -fsSL https://eurelordschaft008.github.io/VPRepo/vprepo.gpg | sudo tee /etc/apt/keyrings/vprepo.gpg >/dev/null
 echo 'deb [signed-by=/etc/apt/keyrings/vprepo.gpg] https://eurelordschaft008.github.io/VPRepo stable main' | sudo tee /etc/apt/sources.list.d/vprepo.list
 sudo apt update
-sudo apt install av1-converter intro-cutter duplikat-finder zdf-downloader
+sudo apt install av1-converter intro-cutter duplikat-finder mediathek-downloader
 ```
 
 Neue Versionen erscheinen danach automatisch in der Aktualisierungsverwaltung von Linux Mint
@@ -158,13 +158,18 @@ oder gleicher Größe. Gestartet wird `duplikat-finder` (Oberfläche) oder `dupl
 - Vergleich zweier Dateien als Diagnose.
 - Datenbankpflege, z. B. Pfade nach einem umbenannten Laufwerk ändern.
 
-## ZDF-Downloader
+## Mediathek Downloader
 
-Lädt Filme und Serien aus der ZDF-Mediathek, von der einzelnen Folge bis zur ganzen Serie mit allen
-Staffeln. Gestartet wird `zdf-downloader` (Oberfläche) oder `zdf-downloader-cli` (Terminal).
+Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat, von der einzelnen Folge bis zur
+ganzen Serie mit allen Staffeln. Gestartet wird `mediathek-downloader` (Oberfläche) oder
+`mediathek-downloader-cli` (Terminal).
+
+Bis Version 1.2 hieß das Programm ZDF-Downloader. Bestehende Installationen wechseln beim nächsten
+Update von selbst, Einstellungen, Verlauf und Warteschlange bleiben erhalten.
 
 **Auswählen**
 
+- Suche und Vorschau laufen über eine, mehrere oder alle Mediatheken.
 - Die Vorschau zeigt neue Filme und Serien als Kacheln mit Titelbild, gefiltert nach Kategorien wie
   Komödie, Drama oder Krimi. Häkchen sammeln eine Auswahl, „Herunterladen“ startet alles auf einmal.
 - Ruht die Maus auf einer Kachel, zeigt ein Popup FSK, Länge, Datum, IMDb-Bewertung und Beschreibung.
@@ -188,7 +193,7 @@ Staffeln. Gestartet wird `zdf-downloader` (Oberfläche) oder `zdf-downloader-cli
   manche Titel sind nur aus Deutschland erreichbar.
 - Das Programm umgeht keinen Kopierschutz. Die Dateien sind für den privaten Gebrauch gedacht und
   dürfen nicht weitergegeben werden.
-- Die Suche läuft über MediathekViewWeb, das Programm steht in keiner Verbindung zum ZDF.
+- Die Suche läuft über MediathekViewWeb, das Programm steht in keiner Verbindung zu den Sendern.
 - Information courtesy of IMDb (https://www.imdb.com). Used with permission.
 
 ## Wie die Paketquelle funktioniert
@@ -200,7 +205,7 @@ GitHub Pages ausgeliefert werden. Der öffentliche Schlüssel ist [`vprepo.gpg`]
 ## Entfernen
 
 ```bash
-sudo apt remove av1-converter intro-cutter duplikat-finder zdf-downloader
+sudo apt remove av1-converter intro-cutter duplikat-finder mediathek-downloader
 ```
 
 ```bash
