@@ -11,8 +11,9 @@ Videosammlungen:
 | [Mediathek Downloader](#mediathek-downloader) | `mediathek-downloader` | Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren Sendern laden |
 
 Alle vier sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
-Terminal-Version. Dieses Repository enthält nur die fertigen Pakete, der Quellcode liegt nicht
-hier.
+Terminal-Version. Dieses Repository enthält die fertigen Pakete und unter
+[`quellcode/`](quellcode) den Quellcode aller vier Programme. Wie sie sich selbst bauen lassen,
+steht jeweils in deren README.
 
 ## Installieren
 
@@ -204,6 +205,7 @@ Update von selbst, Einstellungen, Verlauf und Warteschlange bleiben erhalten.
 Die Projekte bauen ihre Pakete bei jedem Versions-Tag per GitHub Actions unter Ubuntu 24.04 und
 legen sie nach `pool/`. Daraus baut `scripts/build-index.sh` die signierten Indizes, die über
 GitHub Pages ausgeliefert werden. Der öffentliche Schlüssel ist [`vprepo.gpg`](vprepo.gpg).
+Mit jedem Paket kommt der dazugehörige Stand des Quellcodes nach `quellcode/`.
 
 ## Entfernen
 
@@ -214,3 +216,11 @@ sudo apt remove av1-converter intro-cutter duplikat-finder mediathek-downloader
 ```bash
 sudo rm /etc/apt/sources.list.d/vprepo.list /etc/apt/keyrings/vprepo.gpg
 ```
+
+## Lizenz
+
+Copyright (C) 2026 EureLordschaft008
+
+Alle vier Programme und die Skripte dieses Repositorys stehen unter der GNU General Public License,
+Version 3 oder neuer (GPL-3.0-or-later), siehe [LICENSE](LICENSE). Sie werden ohne jede Gewähr
+bereitgestellt.

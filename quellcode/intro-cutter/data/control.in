@@ -1,0 +1,27 @@
+Package: intro-cutter
+Version: @VERSION@
+Section: video
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @SIZE@
+Depends: ffmpeg, libgtk-3-0t64 | libgtk-3-0, util-linux
+Maintainer: EureLordschaft008 <49617891+EureLordschaft008@users.noreply.github.com>
+Description: Wiederkehrende Intros und Outros in Videos erkennen und herausschneiden
+ Intro-Cutter findet ein wiederkehrendes Intro (am Anfang) oder Outro (am
+ Ende) in vielen Videos (inkl. Unterordner) per perceptual Hash und schneidet
+ es mit ffmpeg heraus: verlustfrei per Copy oder framegenau per CPU bzw.
+ GPU (VAAPI). Alle Tonspuren, Untertitel, Kapitel, Anhänge und Cover bleiben
+ erhalten. Die GPU wird höchstens zu 95 % ausgelastet, damit nebenher z. B.
+ Videos flüssig laufen. Die Länge des Intros lässt sich direkt am Video
+ bildgenau festlegen (Wiedergabe, Bildstreifen, Zeitleiste); der Hash-Cache
+ lässt sich ansehen und aufräumen. Während der Bearbeitung zeigt es die
+ ungefähre Restdauer und wann es fertig sein dürfte.
+ .
+ Neu in 5.6: der Modus "Automatisch" findet wiederkehrende Intros ganz ohne
+ Referenz-Video – auch mehrere verschiedene im selben Ordner – und schneidet
+ jedes Video bildgenau an seinem eigenen Intro-Ende. Nur sicher erkannte
+ Intros (in mindestens 5 Videos, ganz am Anfang, eindeutiges Ende) werden
+ vorausgewählt; im Zweifel wird nicht geschnitten. Funktioniert auch mit AV1.
+ .
+ Enthält die grafische Oberfläche (intro-cutter) und die Terminal-Version
+ (intro-cutter-cli). Hash-Cache und Protokolle liegen in ~/.intro-cutter.

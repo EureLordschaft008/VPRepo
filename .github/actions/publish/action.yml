@@ -1,5 +1,5 @@
 name: In VPRepo veröffentlichen
-description: Legt das gebaute .deb aus dem Arbeitsordner in VPRepo ab
+description: Legt das gebaute .deb und den Quellcode aus dem Arbeitsordner in VPRepo ab
 inputs:
   deploy-key:
     description: Privater Deploy-Key mit Schreibrecht auf VPRepo
@@ -28,11 +28,14 @@ runs:
         fi
         mkdir -p "$repo/pool/main/$pkg"
         cp "$deb" "$repo/$target"
+        rm -rf "$repo/quellcode/$pkg"
+        mkdir -p "$repo/quellcode/$pkg"
+        git archive HEAD -- . ':!.github' | tar -x -C "$repo/quellcode/$pkg"
 
         cd "$repo"
         git config user.name 'github-actions[bot]'
         git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-        git add "$target"
+        git add -A "$target" "quellcode/$pkg"
         git commit -m "$(basename "$deb")"
         for attempt in 1 2 3 4 5; do
           git pull --rebase origin main && git push origin main && exit 0

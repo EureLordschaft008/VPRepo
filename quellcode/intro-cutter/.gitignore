@@ -1,0 +1,5 @@
+# gebaute Programme und Pakete (das .deb liegt als Release-Datei auf GitHub)
+/intro-cutter
+/intro-cutter-cli
+/build/
+*.deb

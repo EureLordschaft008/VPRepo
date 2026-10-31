@@ -1,0 +1,10 @@
+# gebaute Programme und Pakete (das .deb liegt als Release-Datei auf GitHub)
+/av1-converter
+/av1-converter-cli
+/build/
+*.deb
+
+# Testvideos und lokale Einstellungen
+*.mp4
+*.mkv
+/.claude/

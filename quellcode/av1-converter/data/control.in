@@ -1,0 +1,20 @@
+Package: av1-converter
+Version: @VERSION@
+Section: video
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @SIZE@
+Depends: ffmpeg, mkvtoolnix, libgtk-3-0t64 | libgtk-3-0
+Recommends: flatpak
+Maintainer: EureLordschaft008 <49617891+EureLordschaft008@users.noreply.github.com>
+Description: Videos nach AV1 umwandeln und Speicherplatz sparen
+ AV1-Converter sucht alle Videos in einem Ordner (inkl. Unterordner) und
+ wandelt sie nach AV1 um – mit den Einstellungen des HandBrake-Profils
+ „AV1 MKV 2160p60 4K“. Die CPU-Jobs laufen mit HandBrake selbst (Flatpak
+ fr.handbrake.ghb oder HandBrakeCLI), die GPU-Jobs mit ffmpeg und VAAPI;
+ beides lässt sich parallel nutzen. Ergebnisse werden geprüft, Originale nur
+ ersetzt, wenn die AV1-Datei vollständig und deutlich kleiner ist. Bearbeitete
+ Dateien werden gemerkt – ein neuer Lauf macht dort weiter.
+ .
+ Enthält die grafische Oberfläche (av1-converter) und die Terminal-Version
+ (av1-converter-cli). Einstellungen und Protokolle liegen in ~/.av1-converter.

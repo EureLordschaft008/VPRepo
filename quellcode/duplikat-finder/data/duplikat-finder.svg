@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f39c4a"/>
+      <stop offset="1" stop-color="#c2416b"/>
+    </linearGradient>
+    <linearGradient id="shade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Hintergrund -->
+  <rect x="8" y="10" width="112" height="112" rx="26" fill="#000000" opacity="0.18"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <rect x="8" y="8" width="112" height="56" rx="26" fill="url(#shade)"/>
+
+  <!-- zwei Filmbilder, versetzt: das Duplikat -->
+  <rect x="34" y="22" width="70" height="48" rx="6" fill="#ffffff" opacity="0.55"/>
+  <rect x="22" y="36" width="70" height="48" rx="6" fill="#ffffff"/>
+  <g fill="#d0566a">
+    <rect x="27" y="39" width="7" height="4" rx="1.2"/>
+    <rect x="40" y="39" width="7" height="4" rx="1.2"/>
+    <rect x="53" y="39" width="7" height="4" rx="1.2"/>
+    <rect x="66" y="39" width="7" height="4" rx="1.2"/>
+    <rect x="79" y="39" width="7" height="4" rx="1.2"/>
+    <rect x="27" y="77" width="7" height="4" rx="1.2"/>
+    <rect x="40" y="77" width="7" height="4" rx="1.2"/>
+    <rect x="53" y="77" width="7" height="4" rx="1.2"/>
+    <rect x="66" y="77" width="7" height="4" rx="1.2"/>
+    <rect x="79" y="77" width="7" height="4" rx="1.2"/>
+  </g>
+  <path d="M50 51 L66 60 L50 69 Z" fill="#d0566a"/>
+
+  <!-- Lupe -->
+  <circle cx="84" cy="84" r="17" fill="none" stroke="#ffffff" stroke-width="7"/>
+  <circle cx="84" cy="84" r="13.5" fill="#ffffff" opacity="0.25"/>
+  <path d="M96.5 96.5 L108 108" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+</svg>

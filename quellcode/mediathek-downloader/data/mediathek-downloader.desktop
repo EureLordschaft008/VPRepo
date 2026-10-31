@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Mediathek Downloader
+GenericName=Video-Downloader
+Comment=Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren Sendern laden
+Exec=mediathek-downloader
+Icon=mediathek-downloader
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=ZDF;ZDFneo;ARD;ONE;WDR;SWR;NDR;rbb;3sat;Mediathek;Download;Serie;Film;AV1;
+StartupWMClass=mediathek-downloader

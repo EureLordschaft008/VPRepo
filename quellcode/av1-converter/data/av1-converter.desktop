@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=AV1-Converter
+GenericName=Videos nach AV1 umwandeln
+Comment=Videos nach AV1 umwandeln und Speicherplatz sparen (HandBrake-Profil AV1 MKV 2160p60 4K)
+Exec=av1-converter
+Icon=av1-converter
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=Video;AV1;Umwandeln;Konvertieren;Speicherplatz;HandBrake;ffmpeg;VAAPI;SVT-AV1;
+StartupNotify=true
+StartupWMClass=av1-converter

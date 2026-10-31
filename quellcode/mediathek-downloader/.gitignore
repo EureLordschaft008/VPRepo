@@ -1,0 +1,8 @@
+/mediathek-downloader
+/mediathek-downloader-cli
+/build/
+*.deb
+*.mp4
+*.mkv
+*.part
+/.claude/

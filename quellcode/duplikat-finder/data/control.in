@@ -1,0 +1,24 @@
+Package: duplikat-finder
+Version: @VERSION@
+Section: video
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @SIZE@
+Depends: libgtk-3-0t64 | libgtk-3-0, libsqlite3-0, libavcodec60, libavformat60, libavutil58, libswscale7, libswresample4, libchromaprint1
+Recommends: mesa-va-drivers, gvfs
+Maintainer: EureLordschaft008 <49617891+EureLordschaft008@users.noreply.github.com>
+Description: Doppelte Videos und Bilder anhand des Inhalts finden
+ Duplikat-Finder vergleicht Videos (und auf Wunsch Bilder) Bild für Bild
+ und findet Duplikate auch dann, wenn sie anders kodiert, verkleinert,
+ gespiegelt oder mit schwarzen Balken versehen sind. Gekürzte Fassungen
+ (Teilclips) findet er über einen Ton-Fingerabdruck.
+ .
+ Gelesen wird gleichzeitig per CPU und GPU (VAAPI) in eigenen
+ Hilfsprozessen: defekte Dateien können das Programm nicht zum Absturz
+ bringen, und andere Programme behalten Vorrang. Gelesene Dateien merkt
+ sich eine SQLite-Datenbank – auch 100 000 Videos und mehr sind kein
+ Problem.
+ .
+ Enthält die grafische Oberfläche (duplikat-finder) und die
+ Terminal-Version (duplikat-finder-cli). Einstellungen, Datenbank und
+ Protokolle liegen in ~/.duplikat-finder.

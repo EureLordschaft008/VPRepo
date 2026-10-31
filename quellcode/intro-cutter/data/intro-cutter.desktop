@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Intro-Cutter
+GenericName=Video-Intros und -Outros entfernen
+Comment=Wiederkehrendes Intro oder Outro in vielen Videos erkennen und herausschneiden
+Exec=intro-cutter
+Icon=intro-cutter
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=Video;Intro;Vorspann;Outro;Abspann;Schneiden;Serie;ffmpeg;
+StartupNotify=true
+StartupWMClass=intro-cutter

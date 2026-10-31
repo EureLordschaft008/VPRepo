@@ -1,0 +1,7 @@
+# gebaute Programme und Pakete (das .deb liegt im GitHub-Release)
+/duplikat-finder
+/duplikat-finder-cli
+/duplikat-finder-worker
+/build/
+*.deb
+*.o

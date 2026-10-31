@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Duplikat-Finder
+GenericName=Doppelte Videos finden
+Comment=Doppelte Videos und Bilder anhand des Inhalts finden – per CPU und GPU
+Exec=duplikat-finder %f
+Icon=duplikat-finder
+Terminal=false
+Categories=AudioVideo;Video;Utility;FileTools;
+Keywords=Video;Duplikat;doppelt;Dubletten;ähnlich;Bilder;aufräumen;Speicherplatz;
+StartupNotify=true
+StartupWMClass=duplikat-finder
