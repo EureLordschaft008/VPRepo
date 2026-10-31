@@ -13,7 +13,8 @@ Videosammlungen:
 Alle vier sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
 Terminal-Version. Dieses Repository enthält die fertigen Pakete und unter
 [`quellcode/`](quellcode) den Quellcode aller vier Programme. Wie sie sich selbst bauen lassen,
-steht jeweils in deren README.
+steht jeweils in deren README. Was sich je Version geändert hat, steht in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Installieren
 
