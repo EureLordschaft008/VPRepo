@@ -165,10 +165,12 @@ Staffeln. Gestartet wird `zdf-downloader` (Oberfläche) oder `zdf-downloader-cli
 
 **Auswählen**
 
-- Die Vorschau zeigt neue Filme und Serien als Kacheln mit Titelbild. Häkchen sammeln eine Auswahl,
-  „Herunterladen“ startet alles auf einmal.
-- Die Detailansicht zeigt Beschreibung, Staffeln und Folgen, der IMDb-Knopf öffnet die passende
-  Seite im Browser.
+- Die Vorschau zeigt neue Filme und Serien als Kacheln mit Titelbild, gefiltert nach Kategorien wie
+  Komödie, Drama oder Krimi. Häkchen sammeln eine Auswahl, „Herunterladen“ startet alles auf einmal.
+- Ruht die Maus auf einer Kachel, zeigt ein Popup FSK, Länge, Datum, IMDb-Bewertung und Beschreibung.
+- Die Detailansicht zeigt zusätzlich Staffeln und Folgen, der IMDb-Knopf öffnet die passende Seite
+  im Browser.
+- Bilder und Informationen bleiben im Zwischenspeicher und werden nicht neu geladen.
 - Jede Folge zeigt, ob sie geladen, angefangen oder noch offen ist. Serien wählen nur aus, was fehlt.
 - Die Bibliothek listet alles Geladene nach Sendung.
 
@@ -187,6 +189,7 @@ Staffeln. Gestartet wird `zdf-downloader` (Oberfläche) oder `zdf-downloader-cli
 - Das Programm umgeht keinen Kopierschutz. Die Dateien sind für den privaten Gebrauch gedacht und
   dürfen nicht weitergegeben werden.
 - Die Suche läuft über MediathekViewWeb, das Programm steht in keiner Verbindung zum ZDF.
+- Information courtesy of IMDb (https://www.imdb.com). Used with permission.
 
 ## Wie die Paketquelle funktioniert
 
