@@ -952,13 +952,16 @@ static gboolean start_ref_preview(gpointer data)
     (void)data;
     ui.ref_preview_timer = 0;
     if (!ui.ref_video) return G_SOURCE_REMOVE;
+    char *png = NULL;
+    int fd = g_file_open_tmp("intro-cutter-vorschau-XXXXXX.png", &png, NULL);
+    if (fd < 0) return G_SOURCE_REMOVE;
+    close(fd);
     RefPreviewJob *t = g_new0(RefPreviewJob, 1);
     t->gen = ++ui.ref_preview_generation;
     t->ref = g_strdup(ui.ref_video);
     t->intro = selected_length();
     t->outro = outro_selected();
-    t->png = g_strdup_printf("%s/intro-cutter-vorschau-%d-%d.png", g_get_tmp_dir(),
-                             (int)getpid(), t->gen);
+    t->png = png;
     g_thread_unref(g_thread_new("vorschau", ref_preview_thread, t));
     return G_SOURCE_REMOVE;
 }

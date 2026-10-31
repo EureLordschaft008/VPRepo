@@ -1,5 +1,5 @@
 /*
- * Intro-Cutter 5.6.0 – Engine (C-Portierung der Python-Version)
+ * Intro-Cutter 5.6.1 – Engine (C-Portierung der Python-Version)
  * =============================================================
  * Erkennt ein wiederkehrendes Intro in vielen Videos (inkl. Unterordner) und
  * schneidet es heraus. Bedient wird die Engine über ic_core.h – von der

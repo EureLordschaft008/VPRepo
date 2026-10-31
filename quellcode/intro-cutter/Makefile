@@ -7,8 +7,8 @@
 #   sudo make install    installiert nach /usr/local (ohne Paketverwaltung)
 #   sudo make uninstall  entfernt diese Installation wieder
 
-VERSION = 5.6.0
-DEBREV  = 3
+VERSION = 5.6.1
+DEBREV  = 1
 PREFIX ?= /usr/local
 CC     ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra

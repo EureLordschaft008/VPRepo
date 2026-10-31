@@ -1,4 +1,4 @@
-# Intro-Cutter 5.6.0
+# Intro-Cutter 5.6.1
 
 Erkennt ein wiederkehrendes Intro – oder alternativ ein Outro – in vielen Videos (inkl.
 Unterordner) und schneidet es heraus: als Programm mit grafischer Oberfläche (`intro-cutter`) und

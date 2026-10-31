@@ -1,5 +1,5 @@
 /*
- * Intro-Cutter 5.6.0 – Terminal-Version
+ * Intro-Cutter 5.6.1 – Terminal-Version
  * =====================================
  * Interaktiver Ablauf wie in der Python-Version: Fragen im Terminal, Erkennung,
  * Trefferliste, Bearbeitung, Zusammenfassung. Die Arbeit erledigt die Engine
