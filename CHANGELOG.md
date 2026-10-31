@@ -21,7 +21,7 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 ## Intro-Cutter
 
-### Noch ohne neues Paket
+### 5.6.1 (31.10.2026)
 - Das Vorschaubild entsteht in einer sicher angelegten Temp-Datei statt unter einem vorhersagbaren
   Namen in `/tmp`.
 
@@ -44,7 +44,7 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 ## Duplikat-Finder
 
-### Noch ohne neues Paket
+### 1.0.4 (31.10.2026)
 - Lizenz GPL-3.0-or-later.
 - Ist „Symbolische Links nicht verfolgen“ aus, erscheint eine verlinkte Datei unter ihrem echten
   Pfad und nicht mehr als Duplikat ihrer selbst.
@@ -64,7 +64,7 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
-### Noch ohne neues Paket
+### 1.6.2 (31.10.2026)
 - Adressen aus Antworten der Mediatheken werden geprüft, curl nutzt nur noch HTTP und HTTPS.
 - Sehr lange Serien- und Folgentitel führen nicht mehr zu einem zu langen Dateinamen.
 - Der Lizenztext liegt dem Paket bei.
