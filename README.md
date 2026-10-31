@@ -1,6 +1,6 @@
 # VPRepo
 
-APT-Paketquelle für Linux Mint 22 und Ubuntu 24.04 (amd64) mit drei Programmen rund um große
+APT-Paketquelle für Linux Mint 22 und Ubuntu 24.04 (amd64) mit vier Programmen rund um
 Videosammlungen:
 
 | Programm | Paket | Aufgabe |
@@ -8,8 +8,9 @@ Videosammlungen:
 | [AV1-Converter](#av1-converter) | `av1-converter` | Videos nach AV1 umwandeln und Speicherplatz sparen |
 | [Intro-Cutter](#intro-cutter) | `intro-cutter` | Wiederkehrende Intros und Outros erkennen und herausschneiden |
 | [Duplikat-Finder](#duplikat-finder) | `duplikat-finder` | Doppelte Videos und Bilder anhand des Inhalts finden |
+| [ZDF-Downloader](#zdf-downloader) | `zdf-downloader` | Filme und Serien aus der ZDF-Mediathek laden |
 
-Alle drei sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
+Alle vier sind in C geschrieben und haben eine grafische Oberfläche (GTK 3) sowie eine
 Terminal-Version. Dieses Repository enthält nur die fertigen Pakete, der Quellcode liegt nicht
 hier.
 
@@ -22,7 +23,7 @@ sudo install -d -m 755 /etc/apt/keyrings
 curl -fsSL https://eurelordschaft008.github.io/VPRepo/vprepo.gpg | sudo tee /etc/apt/keyrings/vprepo.gpg >/dev/null
 echo 'deb [signed-by=/etc/apt/keyrings/vprepo.gpg] https://eurelordschaft008.github.io/VPRepo stable main' | sudo tee /etc/apt/sources.list.d/vprepo.list
 sudo apt update
-sudo apt install av1-converter intro-cutter duplikat-finder
+sudo apt install av1-converter intro-cutter duplikat-finder zdf-downloader
 ```
 
 Neue Versionen erscheinen danach automatisch in der Aktualisierungsverwaltung von Linux Mint
@@ -157,6 +158,36 @@ oder gleicher Größe. Gestartet wird `duplikat-finder` (Oberfläche) oder `dupl
 - Vergleich zweier Dateien als Diagnose.
 - Datenbankpflege, z. B. Pfade nach einem umbenannten Laufwerk ändern.
 
+## ZDF-Downloader
+
+Lädt Filme und Serien aus der ZDF-Mediathek, von der einzelnen Folge bis zur ganzen Serie mit allen
+Staffeln. Gestartet wird `zdf-downloader` (Oberfläche) oder `zdf-downloader-cli` (Terminal).
+
+**Auswählen**
+
+- Die Vorschau zeigt neue Filme und Serien als Kacheln mit Titelbild. Häkchen sammeln eine Auswahl,
+  „Herunterladen“ startet alles auf einmal.
+- Die Detailansicht zeigt Beschreibung, Staffeln und Folgen, der IMDb-Knopf öffnet die passende
+  Seite im Browser.
+- Jede Folge zeigt, ob sie geladen, angefangen oder noch offen ist. Serien wählen nur aus, was fehlt.
+- Die Bibliothek listet alles Geladene nach Sendung.
+
+**Laden**
+
+- Mehrere Sprachen und Untertitel sind wählbar, Standard ist alles, zusammen in einer MKV-Datei.
+- Downloads lassen sich pausieren und auch nach einem Neustart fortsetzen.
+- Das Tempolimit gilt für alle Downloads zusammen und sofort.
+- Auf Wunsch wandelt das Programm die Videos nach AV1 um, per GPU (VAAPI) oder CPU. Das Ergebnis
+  wird geprüft, und die Datei bleibt erhalten, wenn AV1 nicht kleiner wäre.
+
+**Gut zu wissen**
+
+- Die Qualität reicht bis 1080p. Geladen werden kann nur, was gerade in der Mediathek steht, und
+  manche Titel sind nur aus Deutschland erreichbar.
+- Das Programm umgeht keinen Kopierschutz. Die Dateien sind für den privaten Gebrauch gedacht und
+  dürfen nicht weitergegeben werden.
+- Die Suche läuft über MediathekViewWeb, das Programm steht in keiner Verbindung zum ZDF.
+
 ## Wie die Paketquelle funktioniert
 
 Die Projekte bauen ihre Pakete bei jedem Versions-Tag per GitHub Actions unter Ubuntu 24.04 und
@@ -166,7 +197,7 @@ GitHub Pages ausgeliefert werden. Der öffentliche Schlüssel ist [`vprepo.gpg`]
 ## Entfernen
 
 ```bash
-sudo apt remove av1-converter intro-cutter duplikat-finder
+sudo apt remove av1-converter intro-cutter duplikat-finder zdf-downloader
 ```
 
 ```bash
