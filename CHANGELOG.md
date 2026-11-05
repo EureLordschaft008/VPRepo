@@ -64,6 +64,15 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 1.9.0 (05.11.2026)
+- Neuer Reiter „Statistik“: Sehzeit je Tag, Wochentag und Uhrzeit, meistgesehene und
+  meistgeladene Titel, Downloads je Monat und Platz auf der Festplatte.
+- „Meine Videos“: Filme, Folgen und ganze Serien in den Papierkorb verschieben, Fortschritt je
+  Serie („3 von 10 gesehen“) und „Ordner prüfen“, das Speicherort und Verlauf abgleicht.
+- Neue Quellen: ZDFinfo, phoenix, hr, SR, ARD alpha, tagesschau24, DW, funk, ARTE in fünf
+  weiteren Sprachen, NRK (nur weltweit freigegebene Folgen), Internet Archive und Wikimedia Commons
+  (gemeinfreie und frei lizenzierte Filme).
+
 ### 1.8.0 (05.11.2026)
 - Sieben neue Mediatheken: ARTE, MDR, BR, SRF, ORF, KiKA und ZDFtivi.
 - ARTE, SRF und ORF kommen als Stream und werden zu MP4 zusammengesetzt, bei ARTE mit allen
