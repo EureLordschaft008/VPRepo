@@ -12,10 +12,12 @@ Replaces: zdf-downloader (<< 1.3.0~)
 Maintainer: EureLordschaft008 <49617891+EureLordschaft008@users.noreply.github.com>
 Description: Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren laden
  Zeigt neue Filme und Serien als Vorschau mit Bildern, sucht in den
- Mediatheken von ZDF, ZDFneo, ZDFtivi, ARD, ONE, WDR, SWR, NDR, MDR, BR,
- rbb, KiKA, 3sat, ARTE, SRF und ORF, zeigt, was
+ Mediatheken von ZDF, ARD und ihren Sendern, ARTE, DW, SRF, ORF und NRK
+ sowie freie Filme aus dem Internet Archive und von Wikimedia Commons,
+ zeigt, was
  schon geladen ist, und lädt einzelne
  Folgen, ganze Staffeln oder Serien mit allen Sprachen und Untertiteln. Downloads
  lassen sich pausieren und im Tempo begrenzen. Auf Wunsch werden die Videos nach
  AV1 umgewandelt. Geladene Videos erscheinen als Übersicht mit Bildern und
- laufen im eingebauten Player.
+ laufen im eingebauten Player; eine Statistik zeigt Sehzeit, Downloads
+ und Platz auf der Festplatte.

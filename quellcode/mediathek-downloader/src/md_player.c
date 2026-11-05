@@ -794,6 +794,11 @@ bool md_player_available(char **why)
     return true;
 }
 
+const char *md_player_current(void)
+{
+    return player ? player->path : NULL;
+}
+
 bool md_player_play(GtkWindow *parent, const char *path, const char *title, double start,
                     const MdPlayerHooks *hooks)
 {

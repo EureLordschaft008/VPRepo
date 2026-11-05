@@ -2,8 +2,9 @@
  * Mediathek Downloader – kurzer Fuzz-Lauf über die Leser fremder Antworten
  * ========================================================================
  * Verändert gültige Beispiele zufällig und gibt sie an parse_response, netzkino_parse,
- * ard_page_info und html_page_info. Fehler melden die Sanitizer und MALLOC_CHECK_, dazu
- * prüft check_title, was ein Titel unabhängig von der Eingabe einhalten muss.
+ * ard_page_info, html_page_info und die Leser von Internet Archive, NRK und Commons. Fehler
+ * melden die Sanitizer und MALLOC_CHECK_, dazu prüft check_title, was ein Titel unabhängig von
+ * der Eingabe einhalten muss.
  *
  *   FUZZ_SECONDS  Laufzeit in Sekunden (Standard 10)
  *   FUZZ_SEED     Startwert; wiederholt einen Lauf, den Wert nennt jeder Lauf am Anfang
@@ -15,9 +16,11 @@
 #define FUZZ_MAX_INPUT (32 * 1024)
 #define MAX_EDITS 8
 
-typedef enum { TARGET_SEARCH, TARGET_NETZKINO, TARGET_ARD, TARGET_HTML, TARGET_COUNT } Target;
+typedef enum {
+    TARGET_SEARCH, TARGET_NETZKINO, TARGET_ARD, TARGET_HTML, TARGET_FOREIGN, TARGET_COUNT
+} Target;
 
-static const char *const SAMPLES[TARGET_COUNT][3] = {
+static const char *const SAMPLES[TARGET_COUNT][5] = {
     [TARGET_SEARCH] = {
         "{\"result\":{\"results\":[{\"channel\":\"ZDF\",\"topic\":\"Krimi\",\"title\":\"Der Fall "
         "(S02/E03) - Neue Folge\",\"description\":\"Text\",\"timestamp\":1700000000,\"duration\":"
@@ -53,7 +56,30 @@ static const char *const SAMPLES[TARGET_COUNT][3] = {
         "data-testid=\"meta-data-tags\"><a href=\"/altersfreigabe-12\">FSK 12</a><a href=\"/krimi"
         "\">Krimi</a></div>",
         "{\"thumbnailUrl\":\"https://epg-image.zdf.de/f?layout=1&x=2\"}",
+        "<meta data-rh=\"true\" content=\"https://static.dw.com/image/1_6.jpg\" "
+        "property=\"og:image\"/>",
+        "\"thumbnailUrl\":\"https://il.srgssr.ch/images/?a=1\\u0026width=1920\"<meta "
+        "property=\"og:image\" content=\"https://il.srgssr.ch/images/?a=1&amp;width=960\">",
         NULL,
+    },
+    [TARGET_FOREIGN] = {     /* NRK-Katalog, Commons-Seite, Archive-Dateiliste */
+        "{\"seriesType\":\"sequential\",\"sequential\":{\"titles\":{\"title\":\"Serie\"}},"
+        "\"_embedded\":{\"seasons\":[{\"sequenceNumber\":1,\"_embedded\":{\"episodes\":[{"
+        "\"prfId\":\"ABCD12345678\",\"titles\":{\"title\":\"1. episode\",\"subtitle\":"
+        "\"– Start\"},\"durationInSeconds\":1500,\"releaseDateOnDemand\":"
+        "\"2025-01-10T14:00:00+01:00\",\"sequenceNumber\":2,\"usageRights\":{\"geoBlock\":{"
+        "\"isGeoBlocked\":false}},\"availability\":{\"status\":\"available\"},\"image\":"
+        "[{\"url\":\"https://gfx.nrk.no/x\",\"width\":600}]}]}}]}}",
+        "{\"continue\":{},\"query\":{\"pages\":{\"1\":{\"title\":\"File:Film (1927).webm\","
+        "\"videoinfo\":[{\"url\":\"https://upload.wikimedia.org/a.webm\",\"mime\":"
+        "\"video/webm\",\"duration\":5400.5,\"thumburl\":\"https://upload.wikimedia.org/t.jpg\","
+        "\"derivatives\":[{\"src\":\"https://upload.wikimedia.org/a.480p.vp9.webm\",\"type\":"
+        "\"video/webm; codecs=vp9\",\"height\":480}],\"extmetadata\":{\"LicenseShortName\":"
+        "{\"value\":\"Public domain\"},\"ImageDescription\":{\"value\":"
+        "\"<p>Text &amp; mehr</p>\"}}}]}}}}",
+        "{\"result\":[{\"name\":\"film.mp4\",\"format\":\"h.264\",\"size\":\"575274912\","
+        "\"length\":\"5504.57\"},{\"name\":\"film_512kb.mp4\",\"size\":\"40\"},"
+        "{\"name\":\"../x.mp4\",\"size\":\"9\"}]}",
     },
 };
 
@@ -63,9 +89,12 @@ static const char *const TOKENS[] = {
     " · ", " - Neue Folge", "\"-K/x\"", "\"file:///etc/passwd\"", "\"url_video\":\"gopher://x/\"",
     "\"url_website\":\"-o/x\",", "\"posts\":[", "\"slug\":\"s\",", "\"properties\":[\"avod\"],",
     "\"Streaming\":[\"a\"]", "\"thumbnailUrl\":\"", "property=\"og:image\" content=\"", "layout=",
+    "\" property=\"og:image\"", "content=\"",
     "{width}", "\"src\":\"", "\"geoblocked\"", "\"synopsis\":\"", "\"maturityContentRating\":\"FSK",
     "href=\"", "</a>", "</div>", "data-testid=\"meta-data-tags\"", "https://www.zdf.de/assets/",
     "https://epg-image.zdf.de/", "https://www.3sat.de/", "/altersfreigabe",
+    "\"isGeoBlocked\":true", "\"prfId\":\"", "\"_embedded\":{", "\"videoinfo\":[",
+    "\"derivatives\":[", "\"name\":\"", ".mp4\"", "_512kb.mp4", "true", "null",
 };
 
 static char last_input[FUZZ_MAX_INPUT * 2 + MAX_EDITS * 64];
@@ -158,6 +187,19 @@ static void run_input(Target target, const char *input)
         g_hash_table_destroy(seen);
     } else if (target == TARGET_ARD) {
         ard_page_info(input, info);
+    } else if (target == TARGET_FOREIGN) {
+        nrk_parse_catalog(input, "serie", titles);
+        GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        commons_parse(input, titles, seen);
+        g_hash_table_destroy(seen);
+        ArchiveItem *a = g_new0(ArchiveItem, 1);
+        a->fields[IA_ID] = g_strdup("film");
+        a->fields[IA_TITLE] = g_strdup("Film");
+        a->fields[IA_YEAR] = g_strdup("1927");
+        archive_pick_files(a, input);
+        if (a->high && strpbrk(a->high, "/\\")) fail("Dateiname mit Ordner");
+        if (a->high || a->low) g_ptr_array_add(titles, archive_title(a));
+        archive_item_free(a);
     } else {
         html_page_info(COVER_3SAT_PAGE "krimi", input, info);
     }
@@ -203,12 +245,17 @@ int main(void)
     GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     netzkino_parse(SAMPLES[TARGET_NETZKINO][0], &(MdQuery){.text = ""}, titles, seen);
     if (titles->len != 1) fail("Beispiel von Netzkino wird nicht gelesen");
+    g_ptr_array_set_size(titles, 0);
+    nrk_parse_catalog(SAMPLES[TARGET_FOREIGN][0], "serie", titles);
+    commons_parse(SAMPLES[TARGET_FOREIGN][1], titles, seen);
+    if (titles->len != 2) fail("Beispiele von NRK und Commons werden nicht gelesen");
     g_hash_table_destroy(seen);
     g_ptr_array_free(titles, TRUE);
     printf("Fuzz-Lauf fertig: %" G_GINT64_FORMAT " Eingaben (Suche %" G_GINT64_FORMAT ", Netzkino %"
-           G_GINT64_FORMAT ", ARD %" G_GINT64_FORMAT ", Seiten %" G_GINT64_FORMAT "), %"
-           G_GINT64_FORMAT " Titel geprüft\n", rounds, counts[TARGET_SEARCH],
-           counts[TARGET_NETZKINO], counts[TARGET_ARD], counts[TARGET_HTML], titles_checked);
+           G_GINT64_FORMAT ", ARD %" G_GINT64_FORMAT ", Seiten %" G_GINT64_FORMAT ", fremde "
+           "Schnittstellen %" G_GINT64_FORMAT "), %" G_GINT64_FORMAT " Titel geprüft\n", rounds,
+           counts[TARGET_SEARCH], counts[TARGET_NETZKINO], counts[TARGET_ARD],
+           counts[TARGET_HTML], counts[TARGET_FOREIGN], titles_checked);
     g_string_free(text, TRUE);
     g_timer_destroy(timer);
     g_rand_free(rand);

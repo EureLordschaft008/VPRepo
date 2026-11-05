@@ -26,6 +26,8 @@ typedef struct {
 
 /* Lässt sich abspielen? Sonst *why (g_free) mit dem fehlenden Teil */
 bool md_player_available(char **why);
+/* Datei im offenen Player-Fenster; NULL = keines offen */
+const char *md_player_current(void);
 /* path ab start Sekunden abspielen; false = Player nicht verfügbar */
 bool md_player_play(GtkWindow *parent, const char *path, const char *title, double start,
                     const MdPlayerHooks *hooks);

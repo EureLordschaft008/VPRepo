@@ -1,7 +1,9 @@
-# Mediathek Downloader 1.8.0
+# Mediathek Downloader 1.9.0
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ZDFtivi, ARD, ONE, WDR, SWR, NDR, MDR,
-BR, rbb, KiKA, 3sat, ARTE, SRF, ORF und Netzkino –
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ZDFtivi, ZDFinfo, phoenix, ARD, ONE,
+ARD alpha, tagesschau24, WDR, SWR, NDR, MDR, BR, hr, SR, rbb, KiKA, funk, 3sat, ARTE (auch auf
+Englisch, Französisch, Spanisch, Italienisch und Polnisch), DW, SRF, ORF, NRK und Netzkino, dazu
+freie Filme aus dem Internet Archive und von Wikimedia Commons –
 einzelne Folgen, ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
 (`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
 (`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
@@ -20,7 +22,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.8.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.9.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl`, `ffmpeg`
@@ -64,8 +66,20 @@ und für den eingebauten Player GStreamer; `apt` installiert alles mit.
 - **Meine Videos** – alles Geladene als Kacheln wie in einer Mediathek: oben „Weiterschauen“ und
   „Zuletzt geladen“ zum seitlichen Blättern, darunter Serien und Filme von A bis Z. Eine Serie
   öffnet sich mit ihren Staffeln und Folgen; der große Knopf spielt die angefangene oder die nächste
-  ungesehene Folge. Bilder kommen von der Mediathek, sonst als Standbild aus der Datei. Die rechte
-  Maustaste markiert als gesehen oder ungesehen und öffnet Ordner oder ein anderes Programm.
+  ungesehene Folge. Bilder kommen von der Mediathek, sonst als Standbild aus der Datei. Ein Balken
+  zeigt, wie weit eine Datei oder Serie geschaut ist („3 von 10 gesehen“). Die rechte Maustaste
+  markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm und verschiebt Filme,
+  Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
+  Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet.
+- **Ordner prüfen** – gleicht den Speicherort mit dem Verlauf ab: Verschobene Dateien bekommen ihren
+  neuen Ort, Dateien, die das Programm noch nicht kennt (etwa aus einer Sicherung), erscheinen in
+  „Meine Videos“ und zählen als geladen, sofern ihr Name dem üblichen Schema folgt. Einträge ohne
+  Datei lassen sich auf Wunsch aus dem Verlauf entfernen.
+- **Statistik** – Sehzeit insgesamt, der letzten 7 Tage und je Tag, Wochentag und Uhrzeit, Tage am
+  Stück, die meistgesehenen Titel, was wann geladen wurde, die meistgeladenen Serien, der Platz auf
+  der Festplatte, wie viel davon schon gesehen ist, und die größten Dateien. Sehzeit zählt nur im
+  eingebauten Player und nur, was wirklich lief; sie liegt in `~/.mediathek-downloader/sehzeit.tsv`
+  und bleibt, auch wenn die Datei gelöscht wird.
 - **Player** – spielt die Dateien im eigenen Fenster, auch AV1. Er merkt sich, wo eine Datei
   aufgehört hat, macht dort weiter und startet am Ende die nächste Folge. Ton und Untertitel sind
   wählbar. Tasten: Leertaste Pause, ←/→ 10 Sekunden (ohne die Leiste einzublenden), ↑/↓ Lautstärke,
@@ -114,7 +128,7 @@ mediathek-downloader-cli --serien --staffel 26 --laden alle --ziel ~/Videos/Medi
 
 Ohne `--laden` zeigt das Programm nur die Trefferliste mit dem Stand jedes Titels. Strg+C pausiert;
 derselbe Befehl macht dort weiter. `--mediathek arte,srf` beschränkt die Suche auf einzelne
-Mediatheken. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
+Mediatheken, `--mediathek archive,commons` sucht nur freie Filme. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
 der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 ## Qualität und AV1
@@ -158,7 +172,17 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   beginnt beim Fortsetzen von vorn. Verschlüsselte Streams und Livesendungen lädt es nicht.
 - **SRF und ORF weltweit:** Nur Titel, die auch außerhalb der Schweiz bzw. Österreichs freigegeben
   sind, erscheinen. Bei ARTE, SRF und ORF stehen Staffel und Folge oft nur als „(3/6)“ im Titel.
-- **Andere Sender:** HR, SR, Phoenix und weitere öffentlich-rechtliche Sender sind nicht dabei.
+- **NRK** liefert nur Serien, und nur Folgen, die die NRK weltweit freigibt (meist eigene
+  Produktionen), auf Norwegisch. Die Liste kommt von den Serien der NRK-Startseite; über die Suche
+  der Terminal-Version findet sich mehr.
+- **Internet Archive** liefert nur Spielfilme mit gemeinfreier oder CC-Lizenz, meist englisch und
+  älter, höchstens in 480p. Beim ersten Stöbern holt das Programm für 300 Filme die Dateiliste, das
+  dauert etwa eine Minute; danach liegt sie im Zwischenspeicher.
+- **Wikimedia Commons** liefert gemeinfreie Filme und die offenen Filme der Blender Foundation.
+  Ausschnitte und Trailer fallen nach Name und Länge heraus, ganz sicher ist das nicht. Die Dateien
+  sind WebM und landen als MKV.
+- **ARTE intl.** fasst die anderen Sprachfassungen von ARTE zusammen; Titel und Untertitel sind in
+  der jeweiligen Sprache.
 - **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle, ihre
   Player sind auf Kopierschutz ausgelegt, und das Programm umgeht keinen Kopierschutz.
 - **Netzkino** liefert nur Filme, und nur solche ohne Kopierschutz und außerhalb von NetzkinoPlus.

@@ -6,7 +6,7 @@
 #   make install    installiert nach $(PREFIX) (Standard: /usr/local, braucht sudo)
 #   make test       Regressionstests und kurzer Fuzz-Lauf (zusätzlich ASAN=1 für AddressSanitizer)
 
-VERSION  := 1.8.0
+VERSION  := 1.9.0
 DEBREV   := 1
 ARCH     := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 PREFIX   ?= /usr/local
@@ -26,8 +26,10 @@ CORE := src/md_core.c src/md_core.h
 
 all: mediathek-downloader mediathek-downloader-cli
 
-mediathek-downloader: src/md_gui.c src/md_player.c src/md_player.h $(CORE)
-	$(CC) $(CFLAGS) $(GTK_CFLAGS) $(GST_CFLAGS) -o $@ src/md_gui.c src/md_player.c src/md_core.c \
+mediathek-downloader: src/md_gui.c src/md_player.c src/md_player.h src/md_stats.c src/md_stats.h \
+		$(CORE)
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) $(GST_CFLAGS) -o $@ src/md_gui.c src/md_player.c src/md_stats.c \
+		src/md_core.c \
 		$(GTK_LIBS) $(GST_LIBS)
 
 mediathek-downloader-cli: src/md_cli.c $(CORE)

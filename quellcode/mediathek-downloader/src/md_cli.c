@@ -29,8 +29,10 @@ static const char USAGE[] =
     "  --serien               nur Serien\n"
     "  --mindestlaenge MIN    kürzere Einträge ausblenden (Standard 10)\n"
     "  --varianten            Fassungen mit Gebärdensprache anzeigen\n"
-    "  --mediathek LISTE      zdf, zdfneo, zdftivi, ard, one, wdr, swr, ndr, mdr, br,\n"
-    "                         rbb, kika, 3sat, arte, srf, orf, netzkino oder alle,\n"
+    "  --mediathek LISTE      zdf, zdfneo, zdftivi, zdfinfo, phoenix, ard, one,\n"
+    "                         ardalpha, tagesschau24, wdr, swr, ndr, mdr, br, hr, sr,\n"
+    "                         rbb, kika, funk, 3sat, arte, arte-intl, dw, srf, orf,\n"
+    "                         netzkino, archive, nrk, commons oder alle,\n"
     "                         z. B. zdf,ard (Standard alle)\n"
     "  --staffel N            nur diese Staffel\n"
     "  --nur-fehlende         schon geladene Titel ausblenden\n"
@@ -83,31 +85,37 @@ static bool *parse_selection(const char *text, int count)
     return selected;
 }
 
+/* Namen für --mediathek */
+static const struct {
+    const char *name;
+    int source;
+} SOURCE_NAMES[] = {
+    {"zdf", MD_SOURCE_ZDF}, {"zdfneo", MD_SOURCE_ZDFNEO}, {"zdftivi", MD_SOURCE_ZDFTIVI},
+    {"zdfinfo", MD_SOURCE_ZDFINFO}, {"phoenix", MD_SOURCE_PHOENIX}, {"ard", MD_SOURCE_ARD},
+    {"one", MD_SOURCE_ONE}, {"ardalpha", MD_SOURCE_ARDALPHA},
+    {"tagesschau24", MD_SOURCE_TAGESSCHAU24}, {"wdr", MD_SOURCE_WDR}, {"swr", MD_SOURCE_SWR},
+    {"ndr", MD_SOURCE_NDR}, {"mdr", MD_SOURCE_MDR}, {"br", MD_SOURCE_BR}, {"hr", MD_SOURCE_HR},
+    {"sr", MD_SOURCE_SR}, {"rbb", MD_SOURCE_RBB}, {"kika", MD_SOURCE_KIKA},
+    {"funk", MD_SOURCE_FUNK}, {"3sat", MD_SOURCE_3SAT}, {"arte", MD_SOURCE_ARTE},
+    {"arte-intl", MD_SOURCE_ARTE_INTL}, {"dw", MD_SOURCE_DW}, {"srf", MD_SOURCE_SRF},
+    {"orf", MD_SOURCE_ORF}, {"netzkino", MD_SOURCE_NETZKINO}, {"archive", MD_SOURCE_ARCHIVE},
+    {"nrk", MD_SOURCE_NRK}, {"commons", MD_SOURCE_COMMONS},
+};
+
 /* Liste wie "zdf,ard" -> Bitmaske */
 static int parse_sources(const char *text)
 {
     int sources = 0;
     char **parts = g_strsplit(text, ",", -1);
     for (int i = 0; parts[i]; i++) {
-        if (!g_ascii_strcasecmp(parts[i], "zdf")) sources |= MD_SOURCE_ZDF;
-        else if (!g_ascii_strcasecmp(parts[i], "ard")) sources |= MD_SOURCE_ARD;
-        else if (!g_ascii_strcasecmp(parts[i], "3sat")) sources |= MD_SOURCE_3SAT;
-        else if (!g_ascii_strcasecmp(parts[i], "zdfneo")) sources |= MD_SOURCE_ZDFNEO;
-        else if (!g_ascii_strcasecmp(parts[i], "one")) sources |= MD_SOURCE_ONE;
-        else if (!g_ascii_strcasecmp(parts[i], "wdr")) sources |= MD_SOURCE_WDR;
-        else if (!g_ascii_strcasecmp(parts[i], "swr")) sources |= MD_SOURCE_SWR;
-        else if (!g_ascii_strcasecmp(parts[i], "ndr")) sources |= MD_SOURCE_NDR;
-        else if (!g_ascii_strcasecmp(parts[i], "rbb")) sources |= MD_SOURCE_RBB;
-        else if (!g_ascii_strcasecmp(parts[i], "netzkino")) sources |= MD_SOURCE_NETZKINO;
-        else if (!g_ascii_strcasecmp(parts[i], "arte")) sources |= MD_SOURCE_ARTE;
-        else if (!g_ascii_strcasecmp(parts[i], "mdr")) sources |= MD_SOURCE_MDR;
-        else if (!g_ascii_strcasecmp(parts[i], "br")) sources |= MD_SOURCE_BR;
-        else if (!g_ascii_strcasecmp(parts[i], "srf")) sources |= MD_SOURCE_SRF;
-        else if (!g_ascii_strcasecmp(parts[i], "orf")) sources |= MD_SOURCE_ORF;
-        else if (!g_ascii_strcasecmp(parts[i], "kika")) sources |= MD_SOURCE_KIKA;
-        else if (!g_ascii_strcasecmp(parts[i], "zdftivi")) sources |= MD_SOURCE_ZDFTIVI;
-        else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = MD_SOURCE_ALL;
-        else {
+        bool known = !g_ascii_strcasecmp(parts[i], "alle");
+        if (known) sources = MD_SOURCE_ALL;
+        for (size_t n = 0; !known && n < G_N_ELEMENTS(SOURCE_NAMES); n++)
+            if (!g_ascii_strcasecmp(parts[i], SOURCE_NAMES[n].name)) {
+                sources |= SOURCE_NAMES[n].source;
+                known = true;
+            }
+        if (!known) {
             fprintf(stderr, "Unbekannte Mediathek %s\n", parts[i]);
             exit(2);
         }
@@ -155,7 +163,7 @@ static void print_titles(GPtrArray *titles, const char *dir)
             append_labels(tracks, t->subtitles);
             g_string_append_c(tracks, ']');
         }
-        printf("%4u  %-8s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, md_source_label(t->source),
+        printf("%4u  %-12s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, md_source_label(t->source),
                STATUS_TEXT[md_title_status(t, dir, NULL)], t->topic, t->duration / 60, t->title,
                tracks->str);
         g_string_free(tracks, TRUE);

@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.8.0"
+#define MD_VERSION "1.9.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -23,7 +23,13 @@ typedef enum {
     MD_SOURCE_ONE = 16, MD_SOURCE_WDR = 32, MD_SOURCE_SWR = 64, MD_SOURCE_NDR = 128,
     MD_SOURCE_RBB = 256, MD_SOURCE_NETZKINO = 512, MD_SOURCE_ARTE = 1024, MD_SOURCE_MDR = 2048,
     MD_SOURCE_BR = 4096, MD_SOURCE_SRF = 8192, MD_SOURCE_ORF = 16384, MD_SOURCE_KIKA = 32768,
-    MD_SOURCE_ZDFTIVI = 65536, MD_SOURCE_ALL = 131071
+    MD_SOURCE_ZDFTIVI = 1 << 16, MD_SOURCE_ZDFINFO = 1 << 17, MD_SOURCE_PHOENIX = 1 << 18,
+    MD_SOURCE_HR = 1 << 19, MD_SOURCE_SR = 1 << 20, MD_SOURCE_ARDALPHA = 1 << 21,
+    MD_SOURCE_TAGESSCHAU24 = 1 << 22, MD_SOURCE_DW = 1 << 23, MD_SOURCE_FUNK = 1 << 24,
+    MD_SOURCE_ARTE_INTL = 1 << 25,  /* ARTE auf Englisch, Französisch, Spanisch … */
+    MD_SOURCE_ARCHIVE = 1 << 26, MD_SOURCE_NRK = 1 << 27,
+    MD_SOURCE_COMMONS = 1 << 28,    /* Blender-Filme und Wikimedia Commons */
+    MD_SOURCE_ALL = (1 << 29) - 1
 } MdSource;
 typedef enum { MD_QUALITY_HIGH, MD_QUALITY_MEDIUM, MD_QUALITY_LOW } MdQuality;
 typedef enum { MD_ENCODER_GPU, MD_ENCODER_CPU } MdEncoder;
@@ -188,6 +194,34 @@ MdStatus md_title_status(const MdTitle *title, const char *dir, char **path);
 MdHistoryEntry *md_history_snapshot(int *count);
 void md_history_snapshot_free(MdHistoryEntry *entries, int count);
 void md_history_forget(const char *path);   /* Eintrag löschen, die Datei bleibt */
+/* Arbeitet ein offener Auftrag noch an dieser Datei (Zusammenführen, AV1)? */
+bool md_file_in_use(const char *path);
+
+/* --- Speicherort mit dem Verlauf abgleichen ----------------------------- */
+typedef struct {
+    char *path, *topic, *title;
+    int season, episode;        /* -1 = keine Angabe */
+    bool is_film;
+    char *key;                  /* Schlüssel im Verlauf */
+    gint64 size, modified;
+} MdFoundFile;
+
+typedef struct {
+    char *from, *to;
+} MdMovedFile;
+
+typedef struct {
+    int present;                /* Verlauf und Ordner stimmen überein */
+    GPtrArray *moved;           /* MdMovedFile*: Datei liegt jetzt woanders im Ordner */
+    GPtrArray *found;           /* MdFoundFile*: im Ordner, aber nicht im Verlauf */
+    GPtrArray *missing;         /* char*: im Verlauf, Datei nirgends gefunden */
+} MdFolderCheck;
+
+/* Ordner dir durchsuchen (blockiert; kann bei großen Platten dauern) */
+MdFolderCheck *md_check_folder(const char *dir);
+void md_folder_check_free(MdFolderCheck *check);
+/* Ergebnis übernehmen: Pfade berichtigen, Gefundenes aufnehmen, Fehlendes vergessen */
+void md_folder_check_apply(const MdFolderCheck *check, bool relink, bool add, bool forget);
 /* Standbild aus einer geladenen Datei (blockiert, wird zwischengespeichert); NULL = keines.
  * Freigeben mit g_free. */
 char *md_video_frame(const char *path);
