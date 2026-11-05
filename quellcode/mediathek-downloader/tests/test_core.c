@@ -305,6 +305,33 @@ static void test_path_short_names(void)
     g_free(name);
 }
 
+/* Versionen werden Stelle für Stelle als Zahl verglichen, nicht als Text */
+static void test_update_versions(void)
+{
+    g_assert_true(md_version_newer("v1.10.0", "1.9.0"));
+    g_assert_true(md_version_newer("v2.0.0", "1.99.99"));
+    g_assert_true(md_version_newer("1.9.1", "1.9.0"));
+    g_assert_false(md_version_newer("v1.9.0", "1.9.0"));
+    g_assert_false(md_version_newer("v1.8.9", "1.9.0"));
+    g_assert_false(md_version_newer("kaputt", "1.9.0"));
+    g_assert_false(md_version_newer(NULL, "1.9.0"));
+}
+
+/* SHA256SUMS: nur exakt passende Namen, Großbuchstaben werden klein */
+static void test_update_sums(void)
+{
+    const char *hash = "AB12000000000000000000000000000000000000000000000000000000000000";
+    char *sums = g_strdup_printf("%s  mediathek-downloader-1.10.0-setup.exe\n"
+                                 "%s *mediathek-downloader_1.10.0-1_amd64.deb\n"
+                                 "zu-kurz  andere.deb\n", hash, hash);
+    char *found = listed_sha256(sums, "mediathek-downloader_1.10.0-1_amd64.deb");
+    g_assert_cmpstr(found, ==, "ab12000000000000000000000000000000000000000000000000000000000000");
+    g_free(found);
+    g_assert_null(listed_sha256(sums, "mediathek-downloader_1.10.0-1_amd64"));
+    g_assert_null(listed_sha256(sums, "andere.deb"));
+    g_free(sums);
+}
+
 int main(int argc, char **argv)
 {
     test_dir_create();
@@ -318,6 +345,8 @@ int main(int argc, char **argv)
     g_test_add_func("/curl/fortsetzen", test_curl_resume);
     g_test_add_func("/pfad/lange-namen", test_path_long_names);
     g_test_add_func("/pfad/kurze-namen", test_path_short_names);
+    g_test_add_func("/update/versionen", test_update_versions);
+    g_test_add_func("/update/pruefsummen", test_update_sums);
     GThread *server = server_start();
     int result = g_test_run();
     server_stop(server);

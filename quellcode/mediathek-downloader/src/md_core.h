@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.9.0"
+#define MD_VERSION "2.0.1"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -22,14 +22,14 @@ typedef enum {
     MD_SOURCE_ZDF = 1, MD_SOURCE_ARD = 2, MD_SOURCE_3SAT = 4, MD_SOURCE_ZDFNEO = 8,
     MD_SOURCE_ONE = 16, MD_SOURCE_WDR = 32, MD_SOURCE_SWR = 64, MD_SOURCE_NDR = 128,
     MD_SOURCE_RBB = 256, MD_SOURCE_NETZKINO = 512, MD_SOURCE_ARTE = 1024, MD_SOURCE_MDR = 2048,
-    MD_SOURCE_BR = 4096, MD_SOURCE_SRF = 8192, MD_SOURCE_ORF = 16384, MD_SOURCE_KIKA = 32768,
+    MD_SOURCE_BR = 4096, MD_SOURCE_SRF = 8192, MD_SOURCE_KIKA = 32768,
     MD_SOURCE_ZDFTIVI = 1 << 16, MD_SOURCE_ZDFINFO = 1 << 17, MD_SOURCE_PHOENIX = 1 << 18,
     MD_SOURCE_HR = 1 << 19, MD_SOURCE_SR = 1 << 20, MD_SOURCE_ARDALPHA = 1 << 21,
-    MD_SOURCE_TAGESSCHAU24 = 1 << 22, MD_SOURCE_DW = 1 << 23, MD_SOURCE_FUNK = 1 << 24,
+    MD_SOURCE_TAGESSCHAU24 = 1 << 22, MD_SOURCE_FUNK = 1 << 24,
     MD_SOURCE_ARTE_INTL = 1 << 25,  /* ARTE auf Englisch, Französisch, Spanisch … */
-    MD_SOURCE_ARCHIVE = 1 << 26, MD_SOURCE_NRK = 1 << 27,
-    MD_SOURCE_COMMONS = 1 << 28,    /* Blender-Filme und Wikimedia Commons */
-    MD_SOURCE_ALL = (1 << 29) - 1
+    MD_SOURCE_NRK = 1 << 27,
+    /* Bits 14, 23, 26 und 28 waren bis 1.9 ORF, DW, Internet Archive und Commons */
+    MD_SOURCE_ALL = ((1 << 28) - 1) & ~((1 << 14) | (1 << 23) | (1 << 26))
 } MdSource;
 typedef enum { MD_QUALITY_HIGH, MD_QUALITY_MEDIUM, MD_QUALITY_LOW } MdQuality;
 typedef enum { MD_ENCODER_GPU, MD_ENCODER_CPU } MdEncoder;
@@ -225,6 +225,26 @@ void md_folder_check_apply(const MdFolderCheck *check, bool relink, bool add, bo
 /* Standbild aus einer geladenen Datei (blockiert, wird zwischengespeichert); NULL = keines.
  * Freigeben mit g_free. */
 char *md_video_frame(const char *path);
+
+/* --- Updates aus den GitHub-Releases ----------------------------------- */
+typedef struct {
+    char *version;              /* "1.10.0" */
+    char *notes;                /* Text des Releases */
+    char *page;                 /* Release-Seite im Browser */
+    char *file_name, *file_url; /* .deb bzw. Installer für dieses System, NULL = keiner */
+    gint64 file_size;
+    char *sums_url;             /* SHA256SUMS */
+} MdUpdate;
+
+/* Ist candidate ("v1.10.0") neuer als current ("1.9.0")? */
+bool md_version_newer(const char *candidate, const char *current);
+/* Neueste Version abfragen (blockiert) -> NULL = aktuell oder Fehler (*error gesetzt) */
+MdUpdate *md_update_check(char **error);
+void md_update_free(MdUpdate *u);
+/* Datei laden und gegen SHA256SUMS prüfen (blockiert) -> Pfad, NULL = Fehler (*error) */
+char *md_update_download(const MdUpdate *u, char **error);
+/* Programm unabhängig starten: läuft weiter, wenn dieses Programm endet */
+bool md_launch_detached(char **argv, char **error);
 
 /* --- Anzeige ------------------------------------------------------------ */
 char *md_format_size(double bytes);         /* "3,2 GB" */

@@ -31,8 +31,8 @@ static const char USAGE[] =
     "  --varianten            Fassungen mit Gebärdensprache anzeigen\n"
     "  --mediathek LISTE      zdf, zdfneo, zdftivi, zdfinfo, phoenix, ard, one,\n"
     "                         ardalpha, tagesschau24, wdr, swr, ndr, mdr, br, hr, sr,\n"
-    "                         rbb, kika, funk, 3sat, arte, arte-intl, dw, srf, orf,\n"
-    "                         netzkino, archive, nrk, commons oder alle,\n"
+    "                         rbb, kika, funk, 3sat, arte, arte-intl, srf, nrk,\n"
+    "                         netzkino oder alle,\n"
     "                         z. B. zdf,ard (Standard alle)\n"
     "  --staffel N            nur diese Staffel\n"
     "  --nur-fehlende         schon geladene Titel ausblenden\n"
@@ -97,9 +97,8 @@ static const struct {
     {"ndr", MD_SOURCE_NDR}, {"mdr", MD_SOURCE_MDR}, {"br", MD_SOURCE_BR}, {"hr", MD_SOURCE_HR},
     {"sr", MD_SOURCE_SR}, {"rbb", MD_SOURCE_RBB}, {"kika", MD_SOURCE_KIKA},
     {"funk", MD_SOURCE_FUNK}, {"3sat", MD_SOURCE_3SAT}, {"arte", MD_SOURCE_ARTE},
-    {"arte-intl", MD_SOURCE_ARTE_INTL}, {"dw", MD_SOURCE_DW}, {"srf", MD_SOURCE_SRF},
-    {"orf", MD_SOURCE_ORF}, {"netzkino", MD_SOURCE_NETZKINO}, {"archive", MD_SOURCE_ARCHIVE},
-    {"nrk", MD_SOURCE_NRK}, {"commons", MD_SOURCE_COMMONS},
+    {"arte-intl", MD_SOURCE_ARTE_INTL}, {"srf", MD_SOURCE_SRF}, {"nrk", MD_SOURCE_NRK},
+    {"netzkino", MD_SOURCE_NETZKINO},
 };
 
 /* Liste wie "zdf,ard" -> Bitmaske */
@@ -298,10 +297,15 @@ int main(int argc, char **argv)
     printf("%u Treffer%s\n", titles->len, truncated ? " (Liste gekürzt)" : "");
     int rc = 0;
     if (selection) {
+#ifdef G_OS_WIN32
+        signal(SIGINT, on_signal);
+        signal(SIGTERM, on_signal);
+#else
         struct sigaction action = {.sa_handler = on_signal};
         sigaction(SIGINT, &action, NULL);
         sigaction(SIGTERM, &action, NULL);
         signal(SIGPIPE, SIG_IGN);
+#endif
         md_set_rate_limit((gint64)(limit_mb * 1e6));
         md_set_parallel(parallel, 1);
         bool *selected = parse_selection(selection, (int)titles->len);

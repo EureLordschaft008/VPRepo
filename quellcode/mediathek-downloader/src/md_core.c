@@ -12,8 +12,9 @@
  *     überlebt eine Pause auch das Beenden des Programms und einen Neustart des PCs.
  *     Ändert sich das Tempolimit, wird curl mit dem neuen Wert neu gestartet.
  *   * AV1: ffmpeg mit denselben Werten wie der AV1-Converter – GPU per VAAPI
- *     (Qualität 64, 10 Bit), CPU per SVT-AV1 (RF 35). Der Ton wird unverändert
- *     übernommen. Eine pausierte Umwandlung wird per SIGSTOP angehalten.
+ *     (Qualität 64, 10 Bit; unter Windows NVENC, QSV oder AMF), CPU per SVT-AV1 (RF 35).
+ *     Der Ton wird unverändert übernommen. Eine pausierte Umwandlung wird angehalten
+ *     (SIGSTOP, unter Windows NtSuspendProcess).
  *   * Sprachen: Das ZDF liefert jede Sprache als eigene MP4-Datei (…a1a2… Deutsch,
  *     …a3a4… Englisch, …a5a6… Audiodeskription). Die Suche fasst diese Fassungen zu
  *     einem Eintrag zusammen. Das Bild kommt aus der Hauptdatei, jede weitere Sprache
@@ -28,6 +29,9 @@
  *   * Die Warteschlange steht in ~/.mediathek-downloader/warteschlange.tsv. Nach dem
  *     Start sind offene Aufträge pausiert und warten auf "Fortsetzen".
  *
+ * Linux und Windows: Was sich unterscheidet (Prozesse, Pipes, freier Platz), steht im
+ * Abschnitt Prozesse hinter G_OS_WIN32; alles andere ist für beide gleich.
+ *
  * Aufbau dieser Datei: Konfiguration – kleine Helfer – Protokoll – Prozesse –
  * JSON-Leser – Suche – Pfade – Warteschlange (Speichern, Laden) – Download –
  * Umwandlung – Verteiler – öffentliche Schnittstelle
@@ -40,20 +44,26 @@
 #include <fcntl.h>
 #include <glib.h>
 #include <glib/gstdio.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef G_OS_WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <io.h>
+#include <windows.h>
+#define localtime_r(t, tm) localtime_s(tm, t)
+#else
+#include <poll.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+#endif
 
 #include "md_core.h"
 
@@ -74,12 +84,10 @@
 #define COVER_ARTE_PREFIX "https://api-cdn.arte.tv/img/v2/image/"
 #define COVER_ARD_PAGE_PREFIX "https://www.ardmediathek.de/img?"
 #define COVER_SRF_PREFIX "https://il.srgssr.ch/images/"
-#define COVER_ORF_PREFIX "https://api-tvthek.orf.at/assets/"
 #define COVER_KIKA_PREFIX "https://www.kika.de/"
 /* Seiten mit og:image, aber ohne Kategorien */
 #define COVER_OTHER_PAGES "https://www.arte.tv/", "https://www.srf.ch/play/", \
-                          "https://on.orf.at/", COVER_KIKA_PREFIX, "https://p.dw.com/"
-#define COVER_DW_PREFIX "https://static.dw.com/image/"
+                          COVER_KIKA_PREFIX
 #define COVER_3SAT_PAGE "https://www.3sat.de/"
 #define COVER_3SAT_PREFIX "https://www.3sat.de/assets/"
 #define COVER_ARD_PAGE "https://www.ardmediathek.de/"
@@ -153,7 +161,6 @@ static const struct {
     {MD_SOURCE_MDR, "mdr", "MDR", "MDR"},
     {MD_SOURCE_BR, "br", "BR", "BR"},
     {MD_SOURCE_SRF, "srf", "SRF", "SRF"},
-    {MD_SOURCE_ORF, "orf", "ORF", "ORF"},
     {MD_SOURCE_KIKA, "kika", "KiKA", "KiKA"},
     {MD_SOURCE_ZDFTIVI, "zdf-tivi", "ZDF-tivi", "ZDFtivi"},
     {MD_SOURCE_ZDFINFO, "zdfinfo", "ZDFinfo", "ZDFinfo"},
@@ -162,33 +169,19 @@ static const struct {
     {MD_SOURCE_SR, "sr", "SR", "SR"},           /* findet auch SRF, Doppelte fallen weg */
     {MD_SOURCE_ARDALPHA, "ard-alpha", "ARD-alpha", "ARD alpha"},
     {MD_SOURCE_TAGESSCHAU24, "tagesschau24", "tagesschau24", "tagesschau24"},
-    {MD_SOURCE_DW, "dw", "DW", "DW"},
     {MD_SOURCE_FUNK, "funk.net", "Funk.net", "funk"},
     {MD_SOURCE_ARTE_INTL, "arte.en", "ARTE.EN", "ARTE intl."},
     {MD_SOURCE_ARTE_INTL, "arte.fr", "ARTE.FR", "ARTE intl."},
     {MD_SOURCE_ARTE_INTL, "arte.es", "ARTE.ES", "ARTE intl."},
     {MD_SOURCE_ARTE_INTL, "arte.it", "ARTE.IT", "ARTE intl."},
     {MD_SOURCE_ARTE_INTL, "arte.pl", "ARTE.PL", "ARTE intl."},
-    {MD_SOURCE_ARCHIVE, NULL, "Internet Archive", "Archive.org"},
     {MD_SOURCE_NRK, NULL, "NRK", "NRK"},
-    {MD_SOURCE_COMMONS, NULL, "Commons", "Commons"},
 };
 
 /* Netzkino steht nicht in der Suche: Filmlisten der eigenen Schnittstelle, ohne NetzkinoPlus */
 #define NETZKINO_API "https://api.netzkino.de.simplecache.net/capi-2.0a/categories/"
 #define NETZKINO_VIDEO "https://pmd.netzkino-seite.netzkino.de/"
 #define NETZKINO_PAGE "https://www.netzkino.de/details/"
-/* Internet Archive: gemeinfreie und frei lizenzierte Spielfilme */
-#define ARCHIVE_SEARCH "https://archive.org/advancedsearch.php"
-#define ARCHIVE_QUERY "collection:(feature_films) AND mediatype:(movies) AND " \
-                      "licenseurl:(*publicdomain* OR *creativecommons*)"
-#define ARCHIVE_PAGE "https://archive.org/details/"
-#define ARCHIVE_FILES "https://archive.org/metadata/"
-#define ARCHIVE_DOWNLOAD "https://archive.org/download/"
-#define ARCHIVE_IMAGE "https://archive.org/services/img/"
-#define ARCHIVE_BROWSE_ROWS 300     /* so viele Filme in der Vorschau, die beliebtesten zuerst */
-#define ARCHIVE_SEARCH_ROWS 60
-#define ARCHIVE_THREADS 6           /* Dateilisten gleichzeitig */
 /* NRK: nur weltweit freigegebene Folgen; der Stream wird erst beim Laden erfragt */
 #define NRK_API "https://psapi.nrk.no"
 #define NRK_CATALOG NRK_API "/tv/catalog/series/"
@@ -197,29 +190,15 @@ static const struct {
 #define NRK_STREAM_PREFIX "https://nrk-od-world-"  /* weltweites Netz; Norwegen-Server: nein */
 #define NRK_THREADS 6
 #define NRK_SEARCH_SERIES 6         /* so viele Serien je Suchwort */
-/* Wikimedia Commons: gemeinfreie Filme und die offenen Filme der Blender Foundation */
-#define COMMONS_API "https://commons.wikimedia.org/w/api.php"
-#define COMMONS_PAGE "https://commons.wikimedia.org/wiki/"
-#define COMMONS_UPLOAD "https://upload.wikimedia.org/"
-#define COMMONS_PAGE_SIZE 50
-#define COMMONS_BROWSE_PAGES 4      /* je Sammlung, also bis zu 200 Dateien */
-#define COMMONS_MIN_SECONDS 120     /* kürzer: Ausschnitt, Vorspann, Test */
-static const char *const COMMONS_SETS[] = {"deepcat:\"Films in the public domain\"",
-                                           "deepcat:\"Blender Foundation Open Movie Projects\""};
 static const int NETZKINO_CATEGORIES[] = {1, 3, 4, 5, 6, 10, 18, 32, 35, 51, 71, 10333};
 
 /* Mediatheken, deren Titel gleich aufgebaut sind */
 #define ZDF_STYLE (MD_SOURCE_ZDF | MD_SOURCE_ZDFNEO | MD_SOURCE_ZDFTIVI | MD_SOURCE_ZDFINFO)
 #define ARD_STYLE (MD_SOURCE_ARD | MD_SOURCE_ONE)
 /* Folgen als "Serie (3/6)"; ARTE und der BR nennen dazu nur eine Rubrik als Thema */
-#define PART_STYLE (MD_SOURCE_ARTE | MD_SOURCE_ARTE_INTL | MD_SOURCE_BR | MD_SOURCE_ORF | \
-                    MD_SOURCE_SRF)
+#define PART_STYLE (MD_SOURCE_ARTE | MD_SOURCE_ARTE_INTL | MD_SOURCE_BR | MD_SOURCE_SRF)
 /* Mediatheken, die (teils) nur HLS-Streams anbieten; die übrigen haben Dateien */
-#define HLS_SOURCES (MD_SOURCE_ARTE | MD_SOURCE_ARTE_INTL | MD_SOURCE_SRF | MD_SOURCE_ORF | \
-                     MD_SOURCE_NRK)
-/* Diese Quellen stehen nicht in MediathekViewWeb und haben eigene Schnittstellen */
-#define OWN_API_SOURCES (MD_SOURCE_NETZKINO | MD_SOURCE_ARCHIVE | MD_SOURCE_NRK | \
-                         MD_SOURCE_COMMONS)
+#define HLS_SOURCES (MD_SOURCE_ARTE | MD_SOURCE_ARTE_INTL | MD_SOURCE_SRF | MD_SOURCE_NRK)
 
 /* Rubriken, deren Einträge Filme sind (Stöbern ohne Suchbegriff) */
 static const char *const FILM_TOPICS[] = {"Filme", "Spielfilme", "Spielfilm-Highlights",
@@ -310,8 +289,8 @@ char *md_format_time(double seconds)
 /* Größe einer Datei, -1 wenn es sie nicht gibt */
 static gint64 file_size(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0 ? (gint64)st.st_size : -1;
+    GStatBuf st;
+    return g_stat(path, &st) == 0 ? (gint64)st.st_size : -1;
 }
 
 /* Sekunden seit einem festen Zeitpunkt */
@@ -376,7 +355,7 @@ void md_log(const char *format, ...)
     localtime_r(&t, &tm);
     strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
     g_mutex_lock(&g_log_lock);
-    FILE *f = fopen(g_log_path, "a");
+    FILE *f = g_fopen(g_log_path, "a");
     if (f) {
         fprintf(f, "%s  %s\n", stamp, text);
         fclose(f);
@@ -387,9 +366,118 @@ void md_log(const char *format, ...)
 
 /* ---------------------------------------------------------------------------
  * Prozesse
- * Kindprozesse enden mit dem Thread, der sie gestartet hat (PR_SET_PDEATHSIG),
- * damit nach einem Absturz kein curl oder ffmpeg weiterläuft.
+ * Kindprozesse enden mit dem Programm, damit nach einem Absturz kein curl oder ffmpeg
+ * weiterläuft: unter Linux per PR_SET_PDEATHSIG, unter Windows über ein Job-Objekt.
  * ------------------------------------------------------------------------- */
+#ifdef G_OS_WIN32
+/* Windows ruft child_setup nicht im Kind auf; Job und Priorität setzt adopt_child */
+#define child_setup NULL
+
+/* Downloads und Umwandlungen kommen in dieses Job-Objekt: Endet das Programm, schließt Windows
+ * es und beendet alles darin. Was der Nutzer öffnet (Player, Ordner), bleibt draußen. */
+static HANDLE g_child_job;
+
+/* Job anlegen; die eigenen Werkzeuge (curl, ffmpeg) liegen neben dem Programm */
+static void platform_init(void)
+{
+    g_child_job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (g_child_job && !SetInformationJobObject(g_child_job, JobObjectExtendedLimitInformation,
+                                                &limits, sizeof limits)) {
+        CloseHandle(g_child_job);
+        g_child_job = NULL;
+    }
+    char *exe_dir = g_win32_get_package_installation_directory_of_module(NULL);
+    if (exe_dir) {
+        char *bin = g_build_filename(exe_dir, "bin", NULL);
+        const char *old = g_getenv("PATH");
+        char *path = g_strjoin(";", bin, exe_dir, old ? old : "", NULL);
+        g_setenv("PATH", path, TRUE);
+        g_free(path);
+        g_free(bin);
+        g_free(exe_dir);
+    }
+}
+
+/* Gestarteten Prozess an das Programm binden; encoder = mit niedriger Priorität */
+static void adopt_child(GPid pid, bool encoder)
+{
+    if (g_child_job) AssignProcessToJobObject(g_child_job, pid);
+    if (encoder) SetPriorityClass(pid, BELOW_NORMAL_PRIORITY_CLASS);
+}
+
+static int exit_code(int status)
+{
+    return status;
+}
+
+/* Ist der Prozess beendet? -> true und *code = Exit-Code; danach ist pid ungültig */
+static bool child_ended(GPid pid, int *code)
+{
+    if (WaitForSingleObject(pid, 0) != WAIT_OBJECT_0) return false;
+    DWORD value = 128;
+    GetExitCodeProcess(pid, &value);
+    if (code) *code = (int)value;
+    g_spawn_close_pid(pid);
+    return true;
+}
+
+/* Prozess beenden und auf ihn warten */
+static void stop_child(GPid pid)
+{
+    TerminateProcess(pid, 1);
+    WaitForSingleObject(pid, 5000);
+    g_spawn_close_pid(pid);
+}
+
+/* Prozess anhalten oder fortsetzen; Windows kennt kein SIGSTOP */
+static void suspend_child(GPid pid, bool pause)
+{
+    typedef LONG(NTAPI * SuspendFn)(HANDLE);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    SuspendFn fn = ntdll ? (SuspendFn)(void (*)(void))GetProcAddress(
+                               ntdll, pause ? "NtSuspendProcess" : "NtResumeProcess")
+                         : NULL;
+    if (fn) fn(pid);
+}
+
+/* Freier Platz im Ordner -> Bytes, -1 = unbekannt */
+static gint64 free_space(const char *dir)
+{
+    wchar_t *wide = g_utf8_to_utf16(dir, -1, NULL, NULL, NULL);
+    ULARGE_INTEGER available;
+    bool ok = wide && GetDiskFreeSpaceExW(wide, &available, NULL, NULL);
+    g_free(wide);
+    return ok ? (gint64)available.QuadPart : -1;
+}
+
+/* Auf Ausgabe warten; Pipes kennen unter Windows kein poll */
+static void wait_pipes(int out_fd, int err_fd)
+{
+    (void)out_fd;
+    (void)err_fd;
+    g_usleep(POLL_MS * 1000);
+}
+
+/* Alles lesen, was gerade in der Pipe steht, ohne zu blockieren */
+static void drain_pipe(int fd, GString *buffer)
+{
+    HANDLE pipe = (HANDLE)_get_osfhandle(fd);
+    char chunk[4096];
+    DWORD available = 0;
+    while (PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL) && available > 0) {
+        int n = _read(fd, chunk, MIN(available, (DWORD)sizeof chunk));
+        if (n <= 0) break;
+        g_string_append_len(buffer, chunk, n);
+    }
+}
+
+static void prepare_pipe(int fd)
+{
+    (void)fd;
+}
+#else
 /* im Kindprozess vor exec: data != NULL = Encoder, Priorität senken */
 static void child_setup(gpointer data)
 {
@@ -401,19 +489,33 @@ static void child_setup(gpointer data)
     }
 }
 
-/* Kurzes Werkzeug starten und die Ausgabe einsammeln -> Exit-Code, -1 = nicht startbar */
-static int run_capture(char **argv, char **out, char **err)
+static void platform_init(void)
 {
-    int status = 0;
-    /* child_setup: endet das Programm, endet auch das Werkzeug */
-    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, child_setup, NULL, out, err, &status,
-                      NULL))
-        return -1;
+}
+
+/* unter Linux schon in child_setup erledigt */
+static void adopt_child(GPid pid, bool encoder)
+{
+    (void)pid;
+    (void)encoder;
+}
+
+static int exit_code(int status)
+{
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
 
+/* Ist der Prozess beendet? -> true und *code = Exit-Code */
+static bool child_ended(GPid pid, int *code)
+{
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) != pid) return false;
+    if (code) *code = exit_code(status);
+    return true;
+}
+
 /* Prozess beenden (auch wenn er angehalten ist) und auf ihn warten */
-static void stop_child(pid_t pid)
+static void stop_child(GPid pid)
 {
     kill(pid, SIGCONT);
     kill(pid, SIGTERM);
@@ -423,6 +525,51 @@ static void stop_child(pid_t pid)
     }
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
+}
+
+static void suspend_child(GPid pid, bool pause)
+{
+    kill(pid, pause ? SIGSTOP : SIGCONT);
+}
+
+/* Freier Platz im Ordner -> Bytes, -1 = unbekannt */
+static gint64 free_space(const char *dir)
+{
+    struct statvfs st;
+    return statvfs(dir, &st) == 0 ? (gint64)st.f_bavail * (gint64)st.f_frsize : -1;
+}
+
+/* Auf Ausgabe von ffmpeg warten, höchstens POLL_MS */
+static void wait_pipes(int out_fd, int err_fd)
+{
+    struct pollfd fds[2] = {{out_fd, POLLIN, 0}, {err_fd, POLLIN, 0}};
+    poll(fds, 2, POLL_MS);
+}
+
+/* Alles lesen, was gerade in der Pipe steht */
+static void drain_pipe(int fd, GString *buffer)
+{
+    char chunk[4096];
+    ssize_t n;
+    while ((n = read(fd, chunk, sizeof chunk)) > 0) g_string_append_len(buffer, chunk, n);
+}
+
+/* Pipe nicht blockierend lesen */
+static void prepare_pipe(int fd)
+{
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+}
+#endif
+
+/* Kurzes Werkzeug starten und die Ausgabe einsammeln -> Exit-Code, -1 = nicht startbar */
+static int run_capture(char **argv, char **out, char **err)
+{
+    int status = 0;
+    /* child_setup: endet das Programm, endet auch das Werkzeug */
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, child_setup, NULL, out, err, &status,
+                      NULL))
+        return -1;
+    return exit_code(status);
 }
 
 /* ---------------------------------------------------------------------------
@@ -647,13 +794,12 @@ static void drop_unusable_urls(MdTitle *t)
     for (size_t i = 0; i < G_N_ELEMENTS(urls); i++) {
         const char *url = *urls[i];
         bool usable = url_allowed(url) && (!is_hls(url) || (t->source & HLS_SOURCES));
-        if (t->source == MD_SOURCE_ORF) usable &= !strstr(url, "/cms-austria/");
         if (t->source == MD_SOURCE_SRF) usable &= strstr(url, "/world/") != NULL;
         if (!usable) **urls[i] = 0;
     }
 }
 
-/* "Haus aus Glas (3/6) - Das Verschwinden": Folge 3. Die Staffel steht beim ORF im Thema
+/* "Haus aus Glas (3/6) - Das Verschwinden": Folge 3. Die Staffel steht manchmal im Thema
  * ("Soko Donau Staffel 10"), sonst gilt Staffel 1. Ist das Thema nur eine Rubrik wie
  * "Fernsehfilme und Serien - Serien", wird der Serienname zum Thema. */
 static void part_analyse(MdTitle *t, GRegex *part, GRegex *topic_season)
@@ -1316,60 +1462,7 @@ static void netzkino_fetch(const MdQuery *query, GPtrArray *out)
 /* ---------------------------------------------------------------------------
  * Eigene Schnittstellen: gemeinsame Helfer
  * ------------------------------------------------------------------------- */
-/* Objekt lesen und die Werte der Schlüssel names in values ablegen: Text, Zahl als Text oder
- * eine Liste als Zeilen. Unbekannte Schlüssel werden übersprungen. */
-static void json_read_fields(Json *j, const char *const *names, char **values, int count)
-{
-    if (!json_accept(j, '{')) {
-        j->ok = false;
-        return;
-    }
-    if (json_accept(j, '}')) return;
-    do {
-        char *key = json_string(j);
-        if (!json_accept(j, ':')) j->ok = false;
-        json_spaces(j);
-        int index = -1;
-        for (int i = 0; i < count && index < 0; i++)
-            if (!strcmp(key, names[i])) index = i;
-        if (index < 0 || !j->ok) {
-            json_skip(j, 3);
-        } else if (*j->p == '"') {
-            g_free(values[index]);
-            values[index] = json_string(j);
-        } else if (*j->p == '[') {
-            g_free(values[index]);
-            values[index] = json_read_list(j);
-        } else if (*j->p == '{') {
-            json_skip(j, 3);
-        } else {
-            char number[G_ASCII_DTOSTR_BUF_SIZE];
-            g_free(values[index]);
-            values[index] = g_strdup(g_ascii_formatd(number, sizeof number, "%.0f",
-                                                     json_scalar(j)));
-        }
-        g_free(key);
-    } while (j->ok && json_accept(j, ','));
-    if (!json_accept(j, '}')) j->ok = false;
-}
-
-/* Bis zum Wert von key (in einer Folge von Objekten) vorgehen; false = nicht gefunden */
-static bool json_enter(Json *j, const char *key)
-{
-    if (!json_accept(j, '{')) return false;
-    if (json_accept(j, '}')) return false;
-    do {
-        char *name = json_string(j);
-        bool found = j->ok && !strcmp(name, key);
-        g_free(name);
-        if (!json_accept(j, ':')) j->ok = false;
-        if (found) return j->ok;
-        json_skip(j, 2);
-    } while (j->ok && json_accept(j, ','));
-    return false;
-}
-
-/* Kleiner JSON-Baum für verschachtelte Antworten (NRK, Wikimedia) */
+/* Kleiner JSON-Baum für verschachtelte Antworten (NRK) */
 typedef struct JsonNode {
     char type;                  /* o Objekt, a Liste, s Text, n Zahl, b/0 wahr/falsch/null */
     char *text;                 /* s */
@@ -1524,34 +1617,6 @@ static char *plain_words(const char *text)
     return g_strstrip(g_string_free(out, FALSE));
 }
 
-/* Beschreibung ohne HTML: Tags weg, <br> und </p> als Zeilenumbruch, die häufigsten Entities */
-static char *strip_markup(const char *html)
-{
-    static const char *const ENTITIES[][2] = {{"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"},
-                                              {"&quot;", "\""}, {"&#39;", "'"}, {"&nbsp;", " "}};
-    GString *out = g_string_new(NULL);
-    for (const char *p = html; *p;) {
-        if (*p == '<') {
-            const char *end = strchr(p, '>');
-            if (!end) break;
-            if (!g_ascii_strncasecmp(p, "<br", 3) || !g_ascii_strncasecmp(p, "</p", 3))
-                g_string_append_c(out, '\n');
-            p = end + 1;
-            continue;
-        }
-        size_t i = 0;
-        while (i < G_N_ELEMENTS(ENTITIES) && strncmp(p, ENTITIES[i][0], strlen(ENTITIES[i][0])))
-            i++;
-        if (i < G_N_ELEMENTS(ENTITIES)) {
-            g_string_append(out, ENTITIES[i][1]);
-            p += strlen(ENTITIES[i][0]);
-        } else {
-            g_string_append_c(out, *p++);
-        }
-    }
-    return g_strstrip(g_string_free(out, FALSE));
-}
-
 /* Merkzettel wie bei den Mediatheken schreiben: Bild, FSK (leer), je Zeile eine Kategorie */
 static void write_saved_info(const char *website, const char *image, const char *genres)
 {
@@ -1561,177 +1626,6 @@ static void write_saved_info(const char *website, const char *image, const char 
     g_file_set_contents(path, info, -1, NULL);
     g_free(info);
     g_free(path);
-}
-
-/* englische Schlagwörter -> Kategorien der Vorschau */
-static void genres_from_subjects(const char *subjects, GString *out)
-{
-    static const struct {
-        const char *word, *genre;
-    } WORDS[] = {
-        {"comedy", "Komödie"}, {"horror", "Horror"}, {"drama", "Drama"}, {"western", "Western"},
-        {"noir", "Krimi"}, {"crime", "Krimi"}, {"mystery", "Krimi"}, {"thriller", "Thriller"},
-        {"science fiction", "Science-Fiction"}, {"sci-fi", "Science-Fiction"},
-        {"documentary", "Dokumentation"}, {"romance", "Romanze"}, {"war", "Krieg"},
-        {"adventure", "Abenteuer"}, {"animation", "Animation"}, {"cartoon", "Animation"},
-        {"musical", "Musical"}, {"silent", "Stummfilm"}, {"action", "Action"},
-    };
-    char *lower = g_utf8_strdown(subjects ? subjects : "", -1);
-    for (size_t i = 0; i < G_N_ELEMENTS(WORDS); i++) {
-        char *line = g_strconcat(WORDS[i].genre, "\n", NULL);
-        if (strstr(lower, WORDS[i].word) && !strstr(out->str, line)) g_string_append(out, line);
-        g_free(line);
-    }
-    g_free(lower);
-}
-
-/* ---------------------------------------------------------------------------
- * Internet Archive
- * ------------------------------------------------------------------------- */
-enum { IA_ID, IA_TITLE, IA_DESCRIPTION, IA_YEAR, IA_SUBJECT, IA_LANGUAGE, IA_FIELDS };
-
-typedef struct {
-    char *fields[IA_FIELDS];
-    char *high, *low;           /* Dateinamen im Eintrag */
-    double duration;
-    MdCache cache;
-} ArchiveItem;
-
-static void archive_item_free(gpointer data)
-{
-    ArchiveItem *a = data;
-    for (int i = 0; i < IA_FIELDS; i++) g_free(a->fields[i]);
-    g_free(a->high);
-    g_free(a->low);
-    g_free(a);
-}
-
-/* Dateiliste: größte MP4 als hohe, *_512kb.mp4 als niedrige Stufe */
-static void archive_pick_files(ArchiveItem *a, const char *reply)
-{
-    static const char *const NAMES[] = {"name", "format", "size", "length"};
-    Json j = {reply, true};
-    if (!json_enter(&j, "result") || !json_accept(&j, '[') || json_accept(&j, ']')) return;
-    gint64 best = 0;
-    do {
-        char *f[4] = {0};
-        json_read_fields(&j, NAMES, f, 4);
-        bool mp4 = f[0] && g_str_has_suffix(f[0], ".mp4") && !strpbrk(f[0], "/\\\n");
-        gint64 size = f[2] ? g_ascii_strtoll(f[2], NULL, 10) : 0;
-        if (mp4 && g_str_has_suffix(f[0], "_512kb.mp4")) {
-            g_free(a->low);
-            a->low = g_strdup(f[0]);
-        } else if (mp4 && size > best) {
-            best = size;
-            g_free(a->high);
-            a->high = g_strdup(f[0]);
-        }
-        if (mp4 && f[3]) a->duration = MAX(a->duration, g_ascii_strtod(f[3], NULL));
-        for (int i = 0; i < 4; i++) g_free(f[i]);
-    } while (j.ok && json_accept(&j, ','));
-}
-
-/* im Pool: Dateiliste holen (bleibt dauerhaft im Zwischenspeicher) */
-static void archive_files_worker(gpointer data, gpointer user_data)
-{
-    (void)user_data;
-    ArchiveItem *a = data;
-    char *url = g_strconcat(ARCHIVE_FILES, a->fields[IA_ID], "/files", NULL);
-    char *reply = fetch_url(url, -1, a->cache == MD_CACHE_REFRESH ? MD_CACHE_USE : a->cache);
-    if (reply) archive_pick_files(a, reply);
-    g_free(reply);
-    g_free(url);
-}
-
-/* Eintrag zum Titel machen */
-static MdTitle *archive_title(const ArchiveItem *a)
-{
-    const char *id = a->fields[IA_ID];
-    MdTitle *t = g_new0(MdTitle, 1);
-    t->channel = g_strdup("Internet Archive");
-    t->topic = g_strdup("Filme");
-    const char *year = a->fields[IA_YEAR];
-    bool add_year = year && atoi(year) > 1800 && !strstr(a->fields[IA_TITLE], year);
-    t->title = add_year ? g_strdup_printf("%s (%d)", a->fields[IA_TITLE], atoi(year))
-                        : g_strdup(a->fields[IA_TITLE]);
-    char *description = a->fields[IA_DESCRIPTION] ? strip_markup(a->fields[IA_DESCRIPTION])
-                                                  : g_strdup("");
-    t->description = description;
-    t->website = g_strconcat(ARCHIVE_PAGE, id, NULL);
-    char *high = a->high ? g_uri_escape_string(a->high, NULL, FALSE) : NULL;
-    char *low = a->low ? g_uri_escape_string(a->low, NULL, FALSE) : NULL;
-    t->url_high = high ? g_strconcat(ARCHIVE_DOWNLOAD, id, "/", high, NULL) : g_strdup("");
-    t->url_medium = g_strdup("");
-    t->url_low = low ? g_strconcat(ARCHIVE_DOWNLOAD, id, "/", low, NULL) : g_strdup("");
-    t->url_subtitle = g_strdup("");
-    t->duration = (int)a->duration;
-    g_free(high);
-    g_free(low);
-    title_analyse(t);
-    /* der Bestand ist fast ganz englisch; steht eine andere Sprache dabei, Originalfassung */
-    const char *language = a->fields[IA_LANGUAGE];
-    bool english = !language || !*language || !g_ascii_strncasecmp(language, "en", 2);
-    t->track_label = english ? "Englisch" : "Originalfassung";
-    t->track_lang = english ? "eng" : "und";
-    char *image = g_strconcat(ARCHIVE_IMAGE, id, NULL);
-    GString *genres = g_string_new(NULL);
-    genres_from_subjects(a->fields[IA_SUBJECT], genres);
-    write_saved_info(t->website, image, genres->str);
-    g_string_free(genres, TRUE);
-    g_free(image);
-    return t;
-}
-
-/* Filme aus dem Internet Archive. Fällt der Dienst aus, bleiben die übrigen nutzbar. */
-static void archive_fetch(const MdQuery *query, GPtrArray *out)
-{
-    static const char *const NAMES[] = {"identifier", "title", "description", "year", "subject",
-                                        "language"};
-    bool search = query->text && *query->text;
-    char *words = search ? plain_words(query->text) : NULL;
-    if (search && !*words) {
-        g_free(words);
-        return;
-    }
-    char *q = words ? g_strdup_printf(ARCHIVE_QUERY " AND title:(%s)", words)
-                    : g_strdup(ARCHIVE_QUERY);
-    char *escaped = g_uri_escape_string(q, NULL, FALSE);
-    char *url = g_strdup_printf(ARCHIVE_SEARCH "?q=%s&fl[]=identifier&fl[]=title"
-                                "&fl[]=description&fl[]=year&fl[]=subject&fl[]=language"
-                                "&sort[]=downloads+desc&rows=%d&output=json", escaped,
-                                search ? ARCHIVE_SEARCH_ROWS : ARCHIVE_BROWSE_ROWS);
-    char *reply = fetch_url(url, SEARCH_CACHE_SECONDS, query->cache);
-    GPtrArray *items = g_ptr_array_new_with_free_func(archive_item_free);
-    Json j = {reply ? reply : "", true};
-    if (reply && json_enter(&j, "response") && json_enter(&j, "docs") && json_accept(&j, '[') &&
-        !json_accept(&j, ']')) {
-        do {
-            ArchiveItem *a = g_new0(ArchiveItem, 1);
-            a->cache = query->cache;
-            json_read_fields(&j, NAMES, a->fields, IA_FIELDS);
-            for (int i = IA_DESCRIPTION; i < IA_FIELDS; i++)    /* Listen: erste Zeile reicht */
-                if (a->fields[i] && i != IA_SUBJECT) a->fields[i][strcspn(a->fields[i], "\n")] = 0;
-            const char *id = a->fields[IA_ID];
-            if (j.ok && id && a->fields[IA_TITLE] && *id && !strpbrk(id, "/\\?#& \n") &&
-                !strchr(a->fields[IA_TITLE], '\n'))
-                g_ptr_array_add(items, a);
-            else archive_item_free(a);
-        } while (j.ok && json_accept(&j, ','));
-    }
-    GThreadPool *pool = g_thread_pool_new(archive_files_worker, NULL, ARCHIVE_THREADS, FALSE,
-                                          NULL);
-    for (guint i = 0; i < items->len; i++) g_thread_pool_push(pool, items->pdata[i], NULL);
-    g_thread_pool_free(pool, FALSE, TRUE);
-    for (guint i = 0; i < items->len; i++) {
-        const ArchiveItem *a = items->pdata[i];
-        if (a->high || a->low) g_ptr_array_add(out, archive_title(a));
-    }
-    g_ptr_array_free(items, TRUE);
-    g_free(reply);
-    g_free(url);
-    g_free(escaped);
-    g_free(q);
-    g_free(words);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1926,145 +1820,6 @@ static char *nrk_stream(const char *manifest, char **error)
     return stream;
 }
 
-/* ---------------------------------------------------------------------------
- * Wikimedia Commons
- * ------------------------------------------------------------------------- */
-/* Ausschnitte, Trailer und Making-ofs sind keine Filme */
-static bool commons_is_extract(const char *name)
-{
-    static const char *const WORDS[] = {"trailer", "teaser", "excerpt", "extract", "making of",
-                                        "making-of", "clip", "closing credits", "first ",
-                                        "comparison", "test", "demo", "sample", "scene",
-                                        "fragment", "dissolve", "subtitles", "frame",
-                                        "in progress", ".vp9", "120p"};
-    char *lower = g_utf8_strdown(name, -1);
-    bool extract = false;
-    for (size_t i = 0; i < G_N_ELEMENTS(WORDS) && !extract; i++)
-        extract = strstr(lower, WORDS[i]) != NULL;
-    g_free(lower);
-    return extract;
-}
-
-/* Umwandlung von Commons in der Höhe nächst unter max_height; NULL = keine */
-static const char *commons_derivative(const JsonNode *derivatives, int min_height,
-                                      int max_height)
-{
-    const char *best = NULL;
-    double best_height = 0;
-    for (guint i = 0; i < json_count(derivatives); i++) {
-        const JsonNode *d = derivatives->items->pdata[i];
-        const char *src = json_text_at(d, "src"), *type = json_text_at(d, "type");
-        double height = json_number_at(d, "height", 0);
-        if (src && type && g_str_has_prefix(src, COMMONS_UPLOAD) &&
-            g_str_has_prefix(type, "video/webm") && height >= min_height &&
-            height <= max_height && height > best_height) {
-            best = src;
-            best_height = height;
-        }
-    }
-    return best;
-}
-
-/* Datei zum Titel machen; NULL = kein ganzer, freier Film */
-static MdTitle *commons_title(const JsonNode *page)
-{
-    const char *file = json_text_at(page, "title");
-    const JsonNode *info = json_at(page, "videoinfo/0");
-    const char *url = json_text_at(info, "url"), *mime = json_text_at(info, "mime");
-    const char *license = json_text_at(info, "extmetadata/LicenseShortName/value");
-    double duration = json_number_at(info, "duration", 0);
-    if (!file || !g_str_has_prefix(file, "File:") || strchr(file, '\n') || !url ||
-        !g_str_has_prefix(url, COMMONS_UPLOAD) || !mime || !g_str_has_prefix(mime, "video/") ||
-        duration < COMMONS_MIN_SECONDS || !license)
-        return NULL;
-    char *lower_license = g_ascii_strdown(license, -1);
-    bool free_license = strstr(lower_license, "public domain") || strstr(lower_license, "cc");
-    g_free(lower_license);
-    char *name = g_strdup(file + strlen("File:"));
-    char *dot = strrchr(name, '.');
-    if (dot) *dot = 0;
-    g_strdelimit(name, "_", ' ');
-    if (!free_license || commons_is_extract(name)) {
-        g_free(name);
-        return NULL;
-    }
-    const JsonNode *derivatives = json_at(info, "derivatives");
-    const char *high = commons_derivative(derivatives, 721, 1080);
-    const char *medium = commons_derivative(derivatives, 400, 720);
-    const char *low = commons_derivative(derivatives, 200, 399);
-    MdTitle *t = g_new0(MdTitle, 1);
-    t->channel = g_strdup("Commons");
-    t->topic = g_strdup("Filme");
-    t->title = name;
-    const char *description = json_text_at(info, "extmetadata/ImageDescription/value");
-    t->description = description ? strip_markup(description) : g_strdup("");
-    char *escaped = g_uri_escape_string(file, ":", FALSE);
-    t->website = g_strconcat(COMMONS_PAGE, escaped, NULL);
-    g_free(escaped);
-    t->url_high = g_strdup(high ? high : (!medium && !low) ? url : "");
-    t->url_medium = g_strdup(medium ? medium : "");
-    t->url_low = g_strdup(low ? low : "");
-    t->url_subtitle = g_strdup("");
-    t->duration = (int)duration;
-    title_analyse(t);
-    t->is_film = true;
-    t->track_label = "Originalfassung";
-    t->track_lang = "und";
-    write_saved_info(t->website, json_text_at(info, "thumburl"), NULL);
-    return t;
-}
-
-/* Eine Antwortseite von Commons lesen -> true = es gibt weitere Seiten */
-static bool commons_parse(const char *reply, GPtrArray *out, GHashTable *seen)
-{
-    JsonNode *root = json_tree(reply);
-    const JsonNode *pages = json_at(root, "query/pages");
-    guint count = pages && pages->type == 'o' ? pages->items->len : 0;
-    for (guint i = 0; i < count; i++) {
-        MdTitle *t = commons_title(pages->items->pdata[i]);
-        if (t && g_hash_table_add(seen, g_strdup(t->website))) g_ptr_array_add(out, t);
-        else md_title_free(t);
-    }
-    bool more = json_at(root, "continue") != NULL;
-    json_node_free(root);
-    return more;
-}
-
-/* Filme von Wikimedia Commons. Fällt der Dienst aus, bleiben die übrigen nutzbar. */
-static void commons_fetch(const MdQuery *query, GPtrArray *out)
-{
-    bool search = query->text && *query->text;
-    char *words = search ? plain_words(query->text) : NULL;
-    if (search && !*words) {
-        g_free(words);
-        return;
-    }
-    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    for (size_t set = 0; set < G_N_ELEMENTS(COMMONS_SETS); set++) {
-        char *q = g_strdup_printf("filetype:video %s%s%s", COMMONS_SETS[set], words ? " " : "",
-                                  words ? words : "");
-        char *escaped = g_uri_escape_string(q, NULL, FALSE);
-        for (int page = 0; page < (search ? 1 : COMMONS_BROWSE_PAGES); page++) {
-            char *url = g_strdup_printf(COMMONS_API "?action=query&format=json"
-                                        "&generator=search&gsrnamespace=6&gsrlimit=%d"
-                                        "&gsroffset=%d&gsrsearch=%s&prop=videoinfo"
-                                        "&viprop=url|size|mime|derivatives|extmetadata"
-                                        "&viurlwidth=384&viextmetadatafilter="
-                                        "LicenseShortName|ImageDescription",
-                                        COMMONS_PAGE_SIZE, page * COMMONS_PAGE_SIZE, escaped);
-            char *reply = fetch_url(url, SEARCH_CACHE_SECONDS, query->cache);
-            bool more = reply && commons_parse(reply, out, seen);
-            g_free(reply);
-            g_free(url);
-            if (!more) break;
-        }
-        g_free(escaped);
-        g_free(q);
-    }
-    g_hash_table_destroy(seen);
-    g_free(words);
-}
-
 /* Beim Stöbern nach Serien: Einzelsendungen ohne Staffelangabe sind keine Serie */
 static void drop_single_shows(GPtrArray *titles)
 {
@@ -2103,11 +1858,7 @@ GPtrArray *md_search(const MdQuery *query, const volatile gint *cancel, bool *tr
     }
     if (ok && (sources & MD_SOURCE_NETZKINO) && query->kind != MD_KIND_SERIES)
         netzkino_fetch(query, raw);
-    if (ok && (sources & MD_SOURCE_ARCHIVE) && query->kind != MD_KIND_SERIES)
-        archive_fetch(query, raw);
     if (ok && (sources & MD_SOURCE_NRK) && query->kind != MD_KIND_FILMS) nrk_fetch(query, raw);
-    if (ok && (sources & MD_SOURCE_COMMONS) && query->kind != MD_KIND_SERIES)
-        commons_fetch(query, raw);
     if (!ok) {
         g_ptr_array_free(raw, TRUE);
         return NULL;
@@ -2320,7 +2071,7 @@ static void history_add(const Job *j)
     GString *line = g_string_new(NULL);
     history_append_line(line, h);
     char *path = history_path();
-    FILE *file = fopen(path, "a");
+    FILE *file = g_fopen(path, "a");
     if (file) {
         fputs(line->str, file);
         fclose(file);
@@ -2406,7 +2157,7 @@ void md_history_forget(const char *path)
 /* Pfad ohne Endung: <Name>.mp4 und das fertige <Name>.mkv gehören zusammen */
 static char *path_stem(const char *path)
 {
-    const char *slash = strrchr(path, '/'), *dot = strrchr(path, '.');
+    const char *slash = strrchr(path, G_DIR_SEPARATOR), *dot = strrchr(path, '.');
     return dot && (!slash || dot > slash) ? g_strndup(path, (gsize)(dot - path)) : g_strdup(path);
 }
 
@@ -2719,7 +2470,7 @@ static char *text_after(const char *page, const char *key)
     return end ? g_strndup(start, (gsize)(end - start)) : NULL;
 }
 
-/* og:image, auch wenn content vor property steht (DW) */
+/* og:image, auch wenn content vor property steht */
 static char *og_image(const char *page)
 {
     char *url = text_after(page, "property=\"og:image\" content=\"");
@@ -2740,7 +2491,7 @@ static char *replace_parameter(const char *url, const char *name, const char *va
     return g_strdup_printf("%.*s%s%s%s", (int)(found - url), url, name, value, end ? end : "");
 }
 
-/* Bilder von ARTE, SRF, ORF, KiKA und der ARD-Mediathek in kleiner Größe; NULL = unbekannt */
+/* Bilder von ARTE, SRF, KiKA und der ARD-Mediathek in kleiner Größe; NULL = unbekannt */
 static char *other_cover_url(const char *raw)
 {
     char *url = g_strdup(raw), *amp;
@@ -2755,9 +2506,7 @@ static char *other_cover_url(const char *raw)
         result = replace_parameter(url, "imwidth=", COVER_WIDTH_TEXT);
     } else if (g_str_has_prefix(url, COVER_SRF_PREFIX)) {
         result = replace_parameter(url, "width=", COVER_WIDTH_TEXT);
-    } else if (g_str_has_prefix(url, COVER_ORF_PREFIX) ||
-               g_str_has_prefix(url, COVER_KIKA_PREFIX) ||
-               g_str_has_prefix(url, COVER_DW_PREFIX)) {
+    } else if (g_str_has_prefix(url, COVER_KIKA_PREFIX)) {
         result = g_strdup(url);
     }
     g_free(url);
@@ -2933,8 +2682,7 @@ static char *page_gone_info(const char *website)
 static char *page_info(const char *website)
 {
     if (g_str_has_prefix(website, NETZKINO_PAGE) ||     /* schon mit der Filmliste gespeichert */
-        g_str_has_prefix(website, ARCHIVE_PAGE) || g_str_has_prefix(website, NRK_PAGE) ||
-        g_str_has_prefix(website, COMMONS_PAGE)) {
+        g_str_has_prefix(website, NRK_PAGE)) {
         char *path = cache_file(website, ".info"), *saved = NULL;
         g_file_get_contents(path, &saved, NULL, NULL);
         g_free(path);
@@ -3040,8 +2788,8 @@ void md_set_cover_dir(const char *dir)
 
 char *md_video_frame(const char *path)
 {
-    struct stat st;
-    if (stat(path, &st) != 0) return NULL;
+    GStatBuf st;
+    if (g_stat(path, &st) != 0) return NULL;
     /* Größe und Änderungszeit im Schlüssel: eine ersetzte Datei bekommt ein neues Bild */
     char *key = g_strdup_printf("%s|%" G_GINT64_FORMAT "|%" G_GINT64_FORMAT, path,
                                 (gint64)st.st_size, (gint64)st.st_mtime);
@@ -3532,18 +3280,9 @@ static Job *job_by_id(guint id)
 }
 
 /* Muss nach dem Download noch ffmpeg ran? */
-/* WebM oder Ogg (Commons): ohne Umpacken ins MKV stünde es in einer .mp4-Datei */
-static bool open_container(const char *url)
-{
-    const char *end = strpbrk(url, "?#");
-    size_t length = end ? (size_t)(end - url) : strlen(url);
-    return (length >= 5 && !g_ascii_strncasecmp(url + length - 5, ".webm", 5)) ||
-           (length >= 4 && !g_ascii_strncasecmp(url + length - 4, ".ogv", 4));
-}
-
 static bool needs_processing(const Job *j)
 {
-    return j->convert || j->extras->len > 0 || j->skip_main_audio || open_container(j->url);
+    return j->convert || j->extras->len > 0 || j->skip_main_audio;
 }
 
 /* Dateien der Zusatzspuren löschen */
@@ -3665,7 +3404,7 @@ static gint64 remote_size(const char *url, char **error)
 }
 
 /* curl für die .part-Datei starten -> Prozessnummer, 0 = Fehler */
-static pid_t start_curl(const char *url, const char *part, gint64 rate)
+static GPid start_curl(const char *url, const char *part, gint64 rate)
 {
     char *rate_text = g_strdup_printf("%" G_GINT64_FORMAT, rate);
     char *argv[32];
@@ -3688,20 +3427,21 @@ static pid_t start_curl(const char *url, const char *part, gint64 rate)
                             | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
                             child_setup, NULL, &pid, NULL);
     g_free(rate_text);
+    if (ok) adopt_child(pid, false);
     return ok ? pid : 0;
 }
 
 /* Warten, bis curl endet oder unterbrochen wird; Fortschritt nachführen. base = Bytes
  * der schon fertigen Dateien des Auftrags.
  * -> Exit-Code von curl, -1 = unterbrochen, -2 = Tempolimit geändert */
-static int watch_curl(Job *j, pid_t pid, const char *part, gint64 rate, gint64 base)
+static int watch_curl(Job *j, GPid pid, const char *part, gint64 rate, gint64 base)
 {
     gint64 last_size = MAX(file_size(part), 0);
     double last_time = now_seconds();
     for (;;) {
         g_usleep(POLL_MS * 1000);
-        int status = 0;
-        bool ended = waitpid(pid, &status, WNOHANG) == pid;
+        int code = 0;
+        bool ended = child_ended(pid, &code);
         gint64 size = MAX(file_size(part), 0);
         double now = now_seconds();
 
@@ -3719,7 +3459,7 @@ static int watch_curl(Job *j, pid_t pid, const char *part, gint64 rate, gint64 b
         bool new_rate = rate_changed(rate, rate_per_download());
         g_mutex_unlock(&q.lock);
 
-        if (ended) return WIFEXITED(status) ? WEXITSTATUS(status) : -3;
+        if (ended) return code;
         if (interrupted || new_rate) {
             stop_child(pid);
             return interrupted ? -1 : -2;
@@ -3743,9 +3483,8 @@ static void retry_wait(Job *j)
 static bool enough_space(const char *path, gint64 needed)
 {
     char *dir = g_path_get_dirname(path);
-    struct statvfs st;
-    bool ok = statvfs(dir, &st) != 0
-              || (gint64)st.f_bavail * (gint64)st.f_frsize >= needed + MIN_FREE_SPACE;
+    gint64 available = free_space(dir);
+    bool ok = available < 0 || available >= needed + MIN_FREE_SPACE;
     g_free(dir);
     return ok;
 }
@@ -3775,7 +3514,7 @@ static bool download_file(Job *j, const char *url, const char *path, gint64 size
         g_mutex_unlock(&q.lock);
         if (interrupted) break;
 
-        pid_t pid = start_curl(url, part, rate);
+        GPid pid = start_curl(url, part, rate);
         if (!pid) {
             *error = g_strdup("curl lässt sich nicht starten.");
             break;
@@ -3840,14 +3579,6 @@ static void parse_progress(GString *buffer, double *seconds, double *factor)
     }
 }
 
-/* Pipe lesen, ohne zu blockieren */
-static void drain_pipe(int fd, GString *buffer)
-{
-    char chunk[4096];
-    ssize_t n;
-    while ((n = read(fd, chunk, sizeof chunk)) > 0) g_string_append_len(buffer, chunk, n);
-}
-
 /* Argument an die Befehlszeile anhängen */
 static void arg_add(GPtrArray *argv, const char *text)
 {
@@ -3861,7 +3592,7 @@ static void args_add(GPtrArray *argv, const char *const *texts)
 }
 
 /* ---------------------------------------------------------------------------
- * HLS-Streams (ARTE, SRF, ORF)
+ * HLS-Streams (ARTE, SRF, NRK)
  *
  * ffmpeg lädt die Wiedergabeliste und schreibt Bild und alle Tonspuren in die MP4-Datei. Eine
  * angefangene Datei lässt sich nicht fortsetzen: nach einer Pause beginnt der Stream von vorn.
@@ -4073,16 +3804,16 @@ static int watch_hls(Job *j, GPtrArray *argv, const char *part, double duration,
         *messages = g_strdup("ffmpeg lässt sich nicht starten.");
         return 1;
     }
-    fcntl(out_fd, F_SETFL, O_NONBLOCK);
-    fcntl(err_fd, F_SETFL, O_NONBLOCK);
+    adopt_child(pid, false);
+    prepare_pipe(out_fd);
+    prepare_pipe(err_fd);
     GString *progress = g_string_new(NULL), *errors = g_string_new(NULL);
     double seconds = 0, factor = 0, last_time = now_seconds();
     gint64 last_size = 0;
-    int status = 0, rc = -1;
+    int rc = -1;
     bool interrupted = false;
     for (;;) {
-        struct pollfd fds[2] = {{out_fd, POLLIN, 0}, {err_fd, POLLIN, 0}};
-        poll(fds, 2, POLL_MS);
+        wait_pipes(out_fd, err_fd);
         drain_pipe(out_fd, progress);
         drain_pipe(err_fd, errors);
         parse_progress(progress, &seconds, &factor);
@@ -4109,9 +3840,8 @@ static int watch_hls(Job *j, GPtrArray *argv, const char *part, double duration,
             stop_child(pid);
             break;
         }
-        if (waitpid(pid, &status, WNOHANG) == pid) {
+        if (child_ended(pid, &rc)) {
             drain_pipe(err_fd, errors);
-            rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
             break;
         }
     }
@@ -4287,6 +4017,46 @@ static gpointer download_thread(gpointer data)
 /* ---------------------------------------------------------------------------
  * Umwandlung
  * ------------------------------------------------------------------------- */
+#ifdef G_OS_WIN32
+/* AV1-Encoder der Grafikkarte: NVIDIA, Intel oder AMD, NULL = keiner. Unter Windows gibt es
+ * kein Render-Gerät; der Name des Encoders steht an seiner Stelle. */
+static gpointer find_gpu_encoder(gpointer data)
+{
+    (void)data;
+    static const char *const ENCODERS[] = {"av1_nvenc", "av1_qsv", "av1_amf"};
+    for (size_t i = 0; i < G_N_ELEMENTS(ENCODERS); i++) {
+        char *argv[] = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "color=black:s=320x240:d=0.2", "-pix_fmt", "p010le", "-c:v",
+                        (char *)ENCODERS[i], "-f", "null", "-", NULL};
+        if (run_capture(argv, NULL, NULL) == 0) return (gpointer)ENCODERS[i];
+    }
+    return NULL;
+}
+
+static const char *render_device(void)
+{
+    static GOnce once = G_ONCE_INIT;
+    return g_once(&once, find_gpu_encoder, NULL);
+}
+
+bool md_gpu_available(void)
+{
+    return render_device() != NULL;
+}
+
+/* Bild per Grafikkarte nach AV1, Qualität als konstanter Quantisierer */
+static void add_gpu_encoder(GPtrArray *a, const char *encoder, const char *quality)
+{
+    args_add(a, (const char *const[]){"-pix_fmt", "p010le", "-c:v", encoder, NULL});
+    if (!strcmp(encoder, "av1_nvenc"))
+        args_add(a, (const char *const[]){"-rc", "constqp", "-qp", quality, NULL});
+    else if (!strcmp(encoder, "av1_amf"))
+        args_add(a, (const char *const[]){"-rc", "cqp", "-qp_i", quality, "-qp_p", quality,
+                                          NULL});
+    else args_add(a, (const char *const[]){"-global_quality:v", quality, NULL});
+    args_add(a, (const char *const[]){"-g:v", GOP_FRAMES, NULL});
+}
+#else
 /* erstes Render-Gerät, NULL = keines (Ergebnis statisch) */
 static const char *render_device(void)
 {
@@ -4308,6 +4078,16 @@ bool md_gpu_available(void)
                     "-vf", "format=p010,hwupload", "-c:v", "av1_vaapi", "-f", "null", "-", NULL};
     return run_capture(argv, NULL, NULL) == 0;
 }
+
+/* Bild per VAAPI nach AV1 */
+static void add_gpu_encoder(GPtrArray *a, const char *device, const char *quality)
+{
+    (void)device;
+    args_add(a, (const char *const[]){"-vf", "format=p010,hwupload", "-c:v", "av1_vaapi",
+                                      "-rc_mode", "CQP", "-global_quality:v", quality,
+                                      "-g:v", GOP_FRAMES, NULL});
+}
+#endif
 
 /* Videocodec und Dauer lesen -> false bei Fehler */
 static bool media_info(const char *path, char **codec, double *duration)
@@ -4349,8 +4129,10 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
     GPtrArray *a = g_ptr_array_new_with_free_func(g_free);
     args_add(a, (const char *const[]){"ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel",
                                       "error", "-progress", "pipe:1", "-nostats", NULL});
+#ifndef G_OS_WIN32
     if (!copy && encoder == MD_ENCODER_GPU)
         args_add(a, (const char *const[]){"-vaapi_device", device, NULL});
+#endif
     args_add(a, (const char *const[]){"-i", j->target, NULL});
 
     GPtrArray *maps = g_ptr_array_new_with_free_func(g_free);
@@ -4382,9 +4164,7 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
         args_add(a, (const char *const[]){"-c:v", "copy", NULL});
     } else if (encoder == MD_ENCODER_GPU) {
         snprintf(quality, sizeof quality, "%d", j->gpu_quality);
-        args_add(a, (const char *const[]){"-vf", "format=p010,hwupload", "-c:v", "av1_vaapi",
-                                          "-rc_mode", "CQP", "-global_quality:v", quality,
-                                          "-g:v", GOP_FRAMES, NULL});
+        add_gpu_encoder(a, device, quality);
     } else {
         snprintf(quality, sizeof quality, "%d", j->cpu_rf);
         args_add(a, (const char *const[]){"-vf", "format=yuv420p10le", "-c:v", "libsvtav1",
@@ -4408,7 +4188,7 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, do
 {
     const char *device = render_device();
     if (!copy && encoder == MD_ENCODER_GPU && !device) {
-        *messages = g_strdup("Kein Render-Gerät gefunden.");
+        *messages = g_strdup("Keine Grafikkarte mit AV1-Encoder gefunden.");
         return 1;
     }
     GPtrArray *command = build_ffmpeg_cmd(j, copy, encoder, device, tmp);
@@ -4424,15 +4204,15 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, do
         return 1;
     }
     g_ptr_array_free(command, TRUE);
-    fcntl(out_fd, F_SETFL, O_NONBLOCK);
-    fcntl(err_fd, F_SETFL, O_NONBLOCK);
+    adopt_child(pid, true);
+    prepare_pipe(out_fd);
+    prepare_pipe(err_fd);
     GString *progress = g_string_new(NULL), *errors = g_string_new(NULL);
     double seconds = 0, factor = 0;
     bool stopped = false, interrupted = false;
-    int status = 0, rc;
+    int rc = 128;
     for (;;) {
-        struct pollfd fds[2] = {{out_fd, POLLIN, 0}, {err_fd, POLLIN, 0}};
-        poll(fds, 2, POLL_MS);
+        wait_pipes(out_fd, err_fd);
         drain_pipe(out_fd, progress);
         drain_pipe(err_fd, errors);
         parse_progress(progress, &seconds, &factor);
@@ -4450,10 +4230,10 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, do
             break;
         }
         if (pause != stopped) {
-            kill(pid, pause ? SIGSTOP : SIGCONT);
+            suspend_child(pid, pause);
             stopped = pause;
         }
-        if (waitpid(pid, &status, WNOHANG) == pid) {
+        if (child_ended(pid, &rc)) {
             drain_pipe(err_fd, errors);
             break;
         }
@@ -4462,7 +4242,6 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, do
     close(err_fd);
     g_string_free(progress, TRUE);
     if (interrupted) rc = -1;
-    else rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
     *messages = g_string_free(errors, FALSE);
     if (rc > 0) g_strstrip(*messages);
     return rc;
@@ -4647,6 +4426,7 @@ static void adopt_old_app_dir(void)
 
 void md_init(bool persist)
 {
+    platform_init();
     g_app_dir = g_build_filename(g_get_home_dir(), ".mediathek-downloader", NULL);
     adopt_old_app_dir();
     g_log_path = g_build_filename(g_app_dir, "protokoll.log", NULL);
@@ -4689,6 +4469,215 @@ bool md_have_tools(char **missing)
         }
     }
     return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * Updates
+ * Neue Versionen kommen aus den Releases auf GitHub: unter Linux das .deb, unter Windows der
+ * Installer. SHA256SUMS am selben Release schützt vor kaputten Downloads.
+ * ------------------------------------------------------------------------- */
+#define UPDATE_API "https://api.github.com/repos/EureLordschaft008/mediathek-downloader/" \
+                   "releases/latest"
+#define UPDATE_DOWNLOADS "https://github.com/EureLordschaft008/mediathek-downloader/" \
+                         "releases/download/"
+#define UPDATE_PAGES "https://github.com/EureLordschaft008/mediathek-downloader/releases/"
+#ifdef G_OS_WIN32
+#define UPDATE_ASSET_SUFFIX "-setup.exe"
+#else
+#define UPDATE_ASSET_SUFFIX "_amd64.deb"
+#endif
+
+/* "v1.10.2" -> Zahlen; fehlende Stellen sind 0 */
+static void parse_version(const char *text, int parts[3])
+{
+    parts[0] = parts[1] = parts[2] = 0;
+    if (text && (*text == 'v' || *text == 'V')) text++;
+    for (int i = 0; i < 3 && text && g_ascii_isdigit(*text); i++) {
+        parts[i] = (int)g_ascii_strtoll(text, (char **)&text, 10);
+        if (*text != '.') break;
+        text++;
+    }
+}
+
+bool md_version_newer(const char *candidate, const char *current)
+{
+    int a[3], b[3];
+    parse_version(candidate, a);
+    parse_version(current, b);
+    for (int i = 0; i < 3; i++)
+        if (a[i] != b[i]) return a[i] > b[i];
+    return false;
+}
+
+void md_update_free(MdUpdate *u)
+{
+    if (!u) return;
+    g_free(u->version);
+    g_free(u->notes);
+    g_free(u->page);
+    g_free(u->file_name);
+    g_free(u->file_url);
+    g_free(u->sums_url);
+    g_free(u);
+}
+
+MdUpdate *md_update_check(char **error)
+{
+    *error = NULL;
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "30", "-A", USER_AGENT, "-H",
+                    "Accept: application/vnd.github+json", "--url", UPDATE_API, NULL};
+    char *reply = NULL, *messages = NULL;
+    int rc = run_capture(argv, &reply, &messages);
+    JsonNode *root = rc == 0 ? json_tree(reply) : NULL;
+    g_free(reply);
+    if (!root) {
+        *error = g_strdup_printf("GitHub ist nicht erreichbar (%s).",
+                                 rc < 0 ? "curl fehlt" : messages && *messages
+                                 ? g_strstrip(messages) : "keine gültige Antwort");
+        g_free(messages);
+        return NULL;
+    }
+    g_free(messages);
+    MdUpdate *u = NULL;
+    const char *tag = json_text_at(root, "tag_name");
+    if (tag && md_version_newer(tag, MD_VERSION)) {
+        u = g_new0(MdUpdate, 1);
+        u->version = g_strdup(*tag == 'v' ? tag + 1 : tag);
+        u->notes = g_strdup(json_text_at(root, "body") ? json_text_at(root, "body") : "");
+        const char *page = json_text_at(root, "html_url");
+        u->page = g_strdup(page && g_str_has_prefix(page, UPDATE_PAGES) ? page : UPDATE_PAGES);
+        const JsonNode *assets = json_at(root, "assets");
+        for (guint i = 0; i < json_count(assets); i++) {
+            const JsonNode *a = assets->items->pdata[i];
+            const char *name = json_text_at(a, "name");
+            const char *url = json_text_at(a, "browser_download_url");
+            /* nur Dateien aus diesem Repo, und keine Namen mit Pfadteilen */
+            if (!name || !url || !g_str_has_prefix(url, UPDATE_DOWNLOADS) || strchr(name, '/')
+                || strchr(name, '\\'))
+                continue;
+            if (!strcmp(name, "SHA256SUMS")) {
+                g_free(u->sums_url);
+                u->sums_url = g_strdup(url);
+            } else if (g_str_has_suffix(name, UPDATE_ASSET_SUFFIX) && !u->file_url) {
+                u->file_name = g_strdup(name);
+                u->file_url = g_strdup(url);
+                u->file_size = (gint64)json_number_at(a, "size", 0);
+            }
+        }
+    }
+    json_node_free(root);
+    return u;
+}
+
+/* SHA256 einer Datei als Hex-Text, NULL = nicht lesbar */
+static char *file_sha256(const char *path)
+{
+    FILE *f = g_fopen(path, "rb");
+    if (!f) return NULL;
+    GChecksum *sum = g_checksum_new(G_CHECKSUM_SHA256);
+    guchar chunk[65536];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) g_checksum_update(sum, chunk, n);
+    bool ok = !ferror(f);
+    fclose(f);
+    char *hex = ok ? g_strdup(g_checksum_get_string(sum)) : NULL;
+    g_checksum_free(sum);
+    return hex;
+}
+
+/* Prüfsumme zu name aus dem Inhalt von SHA256SUMS ("<hex>  <name>"), NULL = fehlt */
+static char *listed_sha256(const char *sums, const char *name)
+{
+    char *found = NULL;
+    char **lines = g_strsplit(sums, "\n", -1);
+    for (int i = 0; lines[i] && !found; i++) {
+        char *line = g_strstrip(lines[i]);
+        char *space = strchr(line, ' ');
+        if (!space || space - line != 64) continue;
+        const char *file = space;
+        while (*file == ' ' || *file == '*') file++;
+        if (!strcmp(file, name)) found = g_ascii_strdown(line, 64);
+    }
+    g_strfreev(lines);
+    return found;
+}
+
+char *md_update_download(const MdUpdate *u, char **error)
+{
+    *error = NULL;
+    if (!u->file_url || !u->sums_url) {
+        *error = g_strdup(!u->file_url
+                          ? "Für dieses System liegt der neuen Version keine Datei bei."
+                          : "Der neuen Version liegt keine Prüfsumme bei.");
+        return NULL;
+    }
+    char *dir = g_build_filename(g_app_dir, "updates", NULL);
+    g_mkdir_with_parents(dir, 0700);
+    char *path = g_build_filename(dir, u->file_name, NULL);
+    char *part = g_strconcat(path, ".part", NULL);
+    g_free(dir);
+    g_unlink(part);
+    char *fetch[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "1800", "-A", USER_AGENT, "-o", part,
+                     "--url", u->file_url, NULL};
+    char *sums_args[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "30", "-A", USER_AGENT, "--url",
+                         u->sums_url, NULL};
+    char *sums = NULL, *expected = NULL, *actual = NULL;
+    if (run_capture(fetch, NULL, NULL) != 0)
+        *error = g_strdup("Das Update ließ sich nicht laden.");
+    else if (run_capture(sums_args, &sums, NULL) != 0 || !sums
+             || !(expected = listed_sha256(sums, u->file_name)))
+        *error = g_strdup("Die Prüfsumme des Updates fehlt.");
+    else if (!(actual = file_sha256(part)) || strcmp(actual, expected))
+        *error = g_strdup("Das geladene Update ist beschädigt (Prüfsumme stimmt nicht).");
+    else if (g_rename(part, path) != 0 && (g_unlink(path), g_rename(part, path) != 0))
+        *error = g_strdup("Das Update ließ sich nicht speichern.");
+    g_free(sums);
+    g_free(expected);
+    g_free(actual);
+    if (*error) {
+        g_unlink(part);
+        g_free(part);
+        g_free(path);
+        md_log("Update: %s", *error);
+        return NULL;
+    }
+    g_free(part);
+    md_log("Update %s geladen und geprüft: %s", u->version, path);
+    return path;
+}
+
+bool md_launch_detached(char **argv, char **error)
+{
+#ifdef G_OS_WIN32
+    /* eigene Befehlszeile: das Programm wird gleich beendet, das Kind muss weiterlaufen */
+    GString *line = g_string_new(NULL);
+    for (int i = 0; argv[i]; i++) {
+        if (i) g_string_append_c(line, ' ');
+        g_string_append_printf(line, "\"%s\"", argv[i]);
+    }
+    wchar_t *wide = g_utf8_to_utf16(line->str, -1, NULL, NULL, NULL);
+    g_string_free(line, TRUE);
+    STARTUPINFOW si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    bool ok = wide && CreateProcessW(NULL, wide, NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL,
+                                     &si, &pi);
+    g_free(wide);
+    if (ok) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else if (error) {
+        char *message = g_win32_error_message((int)GetLastError());
+        *error = g_strdup_printf("Konnte nicht gestartet werden: %s", message);
+        g_free(message);
+    }
+    return ok;
+#else
+    GError *err = NULL;
+    bool ok = g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &err);
+    if (!ok && error) *error = g_strdup(err->message);
+    g_clear_error(&err);
+    return ok;
+#endif
 }
 
 /* Steht label in der NULL-terminierten Liste? */

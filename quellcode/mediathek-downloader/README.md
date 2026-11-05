@@ -1,17 +1,18 @@
-# Mediathek Downloader 1.9.0
+# Mediathek Downloader 2.0.1
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ZDFtivi, ZDFinfo, phoenix, ARD, ONE,
 ARD alpha, tagesschau24, WDR, SWR, NDR, MDR, BR, hr, SR, rbb, KiKA, funk, 3sat, ARTE (auch auf
-Englisch, Französisch, Spanisch, Italienisch und Polnisch), DW, SRF, ORF, NRK und Netzkino, dazu
-freie Filme aus dem Internet Archive und von Wikimedia Commons –
-einzelne Folgen, ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
+Englisch, Französisch, Spanisch, Italienisch und Polnisch), SRF, NRK und Netzkino – einzelne Folgen,
+ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
 (`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
-(`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
+(`mediathek-downloader-cli`, z. B. für lange Läufe in tmux). Es läuft unter Linux und Windows.
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader. Beim ersten Start zieht es Einstellungen, Verlauf,
 Warteschlange und Zwischenspeicher aus `~/.zdf-downloader` nach `~/.mediathek-downloader` um.
 
 ## Installieren
+
+### Linux
 
 Über die Paketquelle [VPRepo](https://github.com/EureLordschaft008/VPRepo):
 
@@ -22,11 +23,34 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.9.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_2.0.1-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl`, `ffmpeg`
 und für den eingebauten Player GStreamer; `apt` installiert alles mit.
+
+### Windows
+
+`mediathek-downloader-2.0.1-setup.exe` von der
+[Release-Seite](https://github.com/EureLordschaft008/mediathek-downloader/releases/latest) laden
+und starten. Der Installer braucht keine Administratorrechte und legt das Programm nach
+`%LOCALAPPDATA%\Programs\Mediathek Downloader`, dazu einen Eintrag im Startmenü. GTK, GStreamer,
+ffmpeg und curl sind dabei. Die Terminal-Version liegt als `mediathek-downloader-cli.exe` im
+Unterordner `bin`. Windows SmartScreen kennt den Installer nicht und warnt beim ersten Start
+(„Weitere Informationen“ → „Trotzdem ausführen“), weil er nicht signiert ist.
+
+Einstellungen, Verlauf und Protokoll liegen unter Windows in `%USERPROFILE%\.mediathek-downloader`.
+Deinstallieren über die Windows-Einstellungen (Apps); Einstellungen und Videos bleiben dabei.
+
+### Updates
+
+Kurz nach dem Start fragt das Programm bei GitHub nach einer neuen Version. Gibt es eine, erscheint
+oben eine Leiste mit „Installieren“, „Was ist neu?“ und „Überspringen“. „Installieren“ lädt das
+Paket für das eigene System, prüft es gegen die `SHA256SUMS` des Releases und installiert es: unter
+Linux per `pkexec apt-get install` (fragt nach dem Passwort), unter Windows über den Installer, der
+das Programm beendet, die Dateien ersetzt und es wieder starten kann. Die Suche lässt sich in den
+Einstellungen abschalten; das Menü hat „Nach Updates suchen“. Wer VPRepo eingerichtet hat, bekommt
+das Update unter Linux auch über `sudo apt upgrade`.
 
 ## Was es kann
 
@@ -52,7 +76,9 @@ und für den eingebauten Player GStreamer; `apt` installiert alles mit.
   das Programm nie die Bewertung eines falschen Titels. Das trifft vor allem deutsche Titel, die bei
   IMDb anders heißen.
 - **Staffeln und Folgen** – die Detailansicht zeigt Serie → Staffel → Folge; jede Ebene hat ein
-  Häkchen. Eine Serie oder Staffel wählt nur aus, was noch fehlt. Eine schon geladene Folge lässt
+  Häkchen. Eine Serie oder Staffel wählt nur aus, was noch fehlt. Die Folgen kommen aus allen
+  Mediatheken: Bietet die eine nur einen Teil einer Staffel, kommen die übrigen von einer anderen,
+  auch wenn diese in der Vorschau gerade nicht ausgewählt ist. Eine schon geladene Folge lässt
   sich nicht aus Versehen doppelt laden. Ein ⚠ an der Staffel warnt, wenn Folgen in der Nummerierung
   fehlen. Fehlt nur das Ende einer Staffel, ist das nicht zu erkennen.
 - **Was ist schon da?** – Jede Folge trägt ihren Stand: *Geladen*, *In Warteschlange*, *Angefangen*
@@ -97,7 +123,7 @@ und für den eingebauten Player GStreamer; `apt` installiert alles mit.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
   des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
-- **Speicherort** – frei wählbar, Standard ist `~/Videos/Mediathek`.
+- **Speicherort** – frei wählbar, Standard ist `~/Videos/Mediathek` (Windows: `Videos\Mediathek`).
 - **Zwischenspeicher** – Titelbilder, Kategorien, FSK und IMDb-Zuordnung bleiben dauerhaft liegen
   und werden nicht neu geladen. Die Film- und Folgenlisten der Vorschau gelten sechs Stunden; der
   Knopf „Vorschau neu laden“ holt sie sofort frisch. Der Ordner ist frei wählbar, Standard ist
@@ -128,7 +154,7 @@ mediathek-downloader-cli --serien --staffel 26 --laden alle --ziel ~/Videos/Medi
 
 Ohne `--laden` zeigt das Programm nur die Trefferliste mit dem Stand jedes Titels. Strg+C pausiert;
 derselbe Befehl macht dort weiter. `--mediathek arte,srf` beschränkt die Suche auf einzelne
-Mediatheken, `--mediathek archive,commons` sucht nur freie Filme. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
+Mediatheken. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
 der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 ## Qualität und AV1
@@ -141,7 +167,7 @@ der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 | | GPU (Standard) | CPU |
 |---|---|---|
-| Encoder | `av1_vaapi`, Qualität 64 | SVT-AV1, Preset 6, RF 35 |
+| Encoder | `av1_vaapi`, Qualität 64; Windows: `av1_nvenc`, `av1_qsv` oder `av1_amf` | SVT-AV1, Preset 6, RF 35 |
 | Tempo | sehr schnell | sehr viel langsamer |
 | Ton, Untertitel | unverändert | unverändert |
 
@@ -167,20 +193,14 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   aber nur bei sicherem Titeltreffer. Eine Serie übernimmt die Kategorien ihrer neuesten Folge.
 - **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
   Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
-- **ARTE, SRF und ORF** liefern Streams statt Dateien. Das Programm setzt sie mit ffmpeg zu einer
+- **ARTE und SRF** liefern Streams statt Dateien. Das Programm setzt sie mit ffmpeg zu einer
   MP4-Datei zusammen, bei ARTE mit allen Sprachfassungen als Tonspuren. Ein pausierter Stream
   beginnt beim Fortsetzen von vorn. Verschlüsselte Streams und Livesendungen lädt es nicht.
-- **SRF und ORF weltweit:** Nur Titel, die auch außerhalb der Schweiz bzw. Österreichs freigegeben
-  sind, erscheinen. Bei ARTE, SRF und ORF stehen Staffel und Folge oft nur als „(3/6)“ im Titel.
+- **SRF weltweit:** Nur Titel, die auch außerhalb der Schweiz freigegeben sind, erscheinen. Bei
+  ARTE und SRF stehen Staffel und Folge oft nur als „(3/6)“ im Titel.
 - **NRK** liefert nur Serien, und nur Folgen, die die NRK weltweit freigibt (meist eigene
   Produktionen), auf Norwegisch. Die Liste kommt von den Serien der NRK-Startseite; über die Suche
   der Terminal-Version findet sich mehr.
-- **Internet Archive** liefert nur Spielfilme mit gemeinfreier oder CC-Lizenz, meist englisch und
-  älter, höchstens in 480p. Beim ersten Stöbern holt das Programm für 300 Filme die Dateiliste, das
-  dauert etwa eine Minute; danach liegt sie im Zwischenspeicher.
-- **Wikimedia Commons** liefert gemeinfreie Filme und die offenen Filme der Blender Foundation.
-  Ausschnitte und Trailer fallen nach Name und Länge heraus, ganz sicher ist das nicht. Die Dateien
-  sind WebM und landen als MKV.
 - **ARTE intl.** fasst die anderen Sprachfassungen von ARTE zusammen; Titel und Untertitel sind in
   der jeweiligen Sprache.
 - **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle, ihre
@@ -189,11 +209,14 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   Länge und Größe nennt der Dienst nicht, die Qualitätsstufe wirkt dort nicht. Die Dateien sind oft
   sehr groß, teils über 10 GB. Netzkino finanziert sich über Werbung, die beim Download entfällt.
 - **Titelbilder bei WDR, SWR, NDR und rbb** sind Standbilder aus dem Video, und FSK fehlt dort.
-  Bei ARTE, SRF und ORF kommt das Bild nur von der Seite; ohne Seite bleibt der Titel ohne Bild.
+  Bei ARTE und SRF kommt das Bild nur von der Seite; ohne Seite bleibt der Titel ohne Bild.
 - **Titellisten** kommen von [MediathekViewWeb](https://mediathekviewweb.de), nicht von den Sendern.
   Ist dieser Dienst nicht erreichbar, gibt es keine Titel.
 - **Freie Suche** gibt es nur in der Terminal-Version. Die Vorschau zeigt die neuesten Titel, was
   dort nicht steht, findet nur `mediathek-downloader-cli`.
+- **Windows:** Der Papierkorb, der Player und die GPU-Umwandlung laufen über die Windows-Fassungen
+  von GTK, GStreamer und ffmpeg. Ohne NVIDIA-, Intel- oder AMD-Karte mit AV1-Encoder übernimmt die
+  CPU. Die Fenster sehen nach GTK aus, nicht nach Windows.
 
 ## Rechtliches
 
@@ -210,7 +233,10 @@ Rechtsberatung.
 ## Neue Version veröffentlichen
 
 `VERSION` im Makefile und `MD_VERSION` in `src/md_core.h` erhöhen, committen und den Tag `v<Version>`
-pushen. GitHub Actions baut dann das Paket, legt das Release an und bringt es nach VPRepo.
+pushen. GitHub Actions baut dann das .deb und den Windows-Installer, legt beide mit `SHA256SUMS`
+als Release an und bringt das .deb nach VPRepo. Das Release ist zugleich die Quelle der Updates im
+Programm. Von Hand gestartet (`gh workflow run release.yml`) baut der Workflow beide Pakete nur als
+Artefakte, ohne Release.
 
 ## Aus dem Quelltext bauen
 
@@ -219,6 +245,10 @@ Gebraucht werden `gcc`, `make`, `libgtk-3-dev`, `libgstreamer1.0-dev` und `dpkg-
 ```bash
 make deb
 ```
+
+Windows: In [MSYS2](https://www.msys2.org) (Umgebung UCRT64) die Pakete aus
+`.github/workflows/release.yml` installieren und `windows/build.sh` aufrufen; das Ergebnis ist
+`mediathek-downloader-<Version>-setup.exe`.
 
 `make test` führt die Regressionstests und einen kurzen Fuzz-Lauf aus. Die Tests brauchen `curl` und
 legen alles in einem temporären Ordner ab. `make test ASAN=1` nimmt AddressSanitizer dazu. Das geht
@@ -230,7 +260,9 @@ nur, wenn `/etc/ld.so.preload` nichts vorlädt.
 | `src/md_gui.c` | grafische Oberfläche (GTK 3) |
 | `src/md_player.c` | eingebauter Player (GStreamer) |
 | `src/md_cli.c` | Terminal-Version |
+| `src/md_stats.c` | Reiter Statistik |
 | `data/` | Starter, Symbol, Paketbeschreibung |
+| `windows/` | Build-Skript und Installer für Windows |
 
 ## Lizenz
 

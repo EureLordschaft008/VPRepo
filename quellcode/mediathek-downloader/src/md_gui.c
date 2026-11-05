@@ -25,9 +25,12 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
-#include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <gtk/gtk.h>
+#ifdef G_OS_UNIX
+#include <glib-unix.h>
+#include <unistd.h>
+#endif
 #include <locale.h>
 #include <signal.h>
 #include <string.h>
@@ -48,6 +51,7 @@
 #define COVER_WIDTH 224
 #define COVER_HEIGHT 126
 #define COVER_THREADS 4
+#define UPDATE_DELAY_SECONDS 8  /* Update-Suche nach dem Start, wenn die Vorschau steht */
 #define HOVER_DELAY_MS 500     /* so lange ruht die Maus auf der Kachel bis zum Popup */
 #define GENRE_TICKS 4           /* neue Kategorien alle so vielen Timer-Schläge zeigen */
 #define FOOTER_PREVIEW 0
@@ -58,9 +62,10 @@
 #define MD_SOURCE_ALL_1_5 511
 #define MD_SOURCE_ALL_1_6 1023
 #define MD_SOURCE_ALL_1_8 131071
+#define MD_SOURCE_ALL_1_9 ((1 << 29) - 1)
 #define IMDB_THREADS 2
 #define ALL_LANGUAGES "Alle Sprachen"
-#define SOURCE_COUNT 29
+#define SOURCE_COUNT 25
 #define WATCH_FILE "wiedergabe.tsv"
 #define WATCHED_SHARE 0.95      /* ab diesem Anteil gilt eine Datei als gesehen (Abspann) */
 #define RESUME_MIN_SECONDS 10   /* kürzer angeschaut zählt nicht als angefangen */
@@ -76,13 +81,17 @@ static const int SOURCE_BITS[SOURCE_COUNT] = {
     MD_SOURCE_ARD, MD_SOURCE_ONE, MD_SOURCE_ARDALPHA, MD_SOURCE_TAGESSCHAU24, MD_SOURCE_WDR,
     MD_SOURCE_SWR, MD_SOURCE_NDR, MD_SOURCE_MDR, MD_SOURCE_BR, MD_SOURCE_HR, MD_SOURCE_SR,
     MD_SOURCE_RBB, MD_SOURCE_KIKA, MD_SOURCE_FUNK, MD_SOURCE_3SAT, MD_SOURCE_ARTE,
-    MD_SOURCE_ARTE_INTL, MD_SOURCE_DW, MD_SOURCE_SRF, MD_SOURCE_ORF, MD_SOURCE_NETZKINO,
-    MD_SOURCE_ARCHIVE, MD_SOURCE_NRK, MD_SOURCE_COMMONS};
+    MD_SOURCE_ARTE_INTL, MD_SOURCE_SRF, MD_SOURCE_NRK, MD_SOURCE_NETZKINO};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
                                             "Mittel (ca. 2,3 GB je 90 min)",
                                             "Niedrig (ca. 0,5 GB je 90 min)"};
+#ifdef G_OS_WIN32
+static const char *const ENCODER_TEXT[2] = {"GPU – schnell (NVENC, QSV oder AMF)",
+                                            "CPU – langsam (SVT-AV1)"};
+#else
 static const char *const ENCODER_TEXT[2] = {"GPU – schnell (VAAPI)", "CPU – langsam (SVT-AV1)"};
+#endif
 
 typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 
@@ -170,7 +179,7 @@ typedef struct {
 /* alle Folgen einer Serie im Hintergrund */
 typedef struct {
     char *key, *topic, *dir, *error;
-    int min_minutes, source;
+    int min_minutes;
     bool hide_variants;
     MdCache cache;
     GPtrArray *items;           /* Item* */
@@ -228,6 +237,8 @@ typedef struct {
     bool limit_on, convert, keep_original, show_signed;
     int width, height;
     bool maximized;
+    bool update_check;          /* beim Start nach Updates suchen */
+    char *update_skip;          /* diese Version nicht mehr anbieten */
 } Config;
 
 typedef struct {
@@ -239,6 +250,11 @@ typedef struct {
     int page_column_count;
     bool quitting, gpu_ok;
     guint inhibit_cookie;
+
+    /* Updates */
+    GtkWidget *update_bar, *update_label, *update_install, *update_notes, *update_skip_button;
+    MdUpdate *update;
+    bool update_busy;
 
     /* Neue Folgen */
     ResultTree news_tree;
@@ -748,16 +764,21 @@ static void settings_load(void)
     c->min_minutes = settings_int(file, "Mindestlaenge", 10, 0, 300);
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
-    c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL);
+    c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL_1_9);
     if (c->sources == MD_SOURCE_ALL_1_4 || c->sources == MD_SOURCE_ALL_1_5 ||
-        c->sources == MD_SOURCE_ALL_1_6 || c->sources == MD_SOURCE_ALL_1_8)
+        c->sources == MD_SOURCE_ALL_1_6 || c->sources == MD_SOURCE_ALL_1_8 ||
+        c->sources == MD_SOURCE_ALL_1_9)
         c->sources = MD_SOURCE_ALL;
+    c->sources &= MD_SOURCE_ALL;            /* entfernte Mediatheken (ORF, DW …) fallen weg */
+    if (!c->sources) c->sources = MD_SOURCE_ALL;
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);
     c->show_signed = settings_bool(file, "Gebaerdensprache", false);
     c->width = settings_int(file, "Breite", 980, 0, 10000);
     c->height = settings_int(file, "Hoehe", 800, 0, 10000);
     c->maximized = settings_bool(file, "Maximiert", false);
+    c->update_check = settings_bool(file, "UpdateSuchen", true);
+    c->update_skip = g_key_file_get_string(file, SETTINGS_GROUP, "UpdateUebersprungen", NULL);
     g_key_file_free(file);
 }
 
@@ -784,6 +805,9 @@ static void settings_save(void)
     g_key_file_set_integer(file, SETTINGS_GROUP, "Breite", c->width);
     g_key_file_set_integer(file, SETTINGS_GROUP, "Hoehe", c->height);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "Maximiert", c->maximized);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "UpdateSuchen", c->update_check);
+    if (c->update_skip)
+        g_key_file_set_string(file, SETTINGS_GROUP, "UpdateUebersprungen", c->update_skip);
     char *path = settings_path();
     if (!g_key_file_save_to_file(file, path, NULL)) md_log("Einstellungen nicht gespeichert");
     g_free(path);
@@ -1982,6 +2006,7 @@ static gboolean on_series_done(gpointer data)
                 GPtrArray *old = group->seasons;
                 group->seasons = fresh->seasons;
                 fresh->seasons = old;
+                group->source |= fresh->source;     /* Folgen auch aus anderen Mediatheken */
                 group->complete = true;
             }
             g_ptr_array_free(found, TRUE);
@@ -2005,18 +2030,25 @@ static gboolean on_series_done(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+/* Alle Folgen aus allen Mediatheken, nicht nur aus denen, die die Vorschau zeigte: Bietet
+ * die eine Mediathek nur einige Folgen einer Staffel, kommen die übrigen von einer anderen. */
 static gpointer series_thread(gpointer data)
 {
     SeriesJob *job = data;
-    MdQuery query = {.text = job->topic, .kind = MD_KIND_ALL, .sources = job->source,
+    MdQuery query = {.text = job->topic, .kind = MD_KIND_ALL, .sources = MD_SOURCE_ALL,
                      .min_minutes = job->min_minutes,
                      .hide_variants = job->hide_variants, .cache = job->cache};
     GPtrArray *titles = md_search(&query, NULL, NULL, &job->error);
     if (titles) {
-        /* die Suche findet das Wort auch in fremden Sendungen */
-        for (guint i = titles->len; i-- > 0;)
-            if (strcmp(((MdTitle *)titles->pdata[i])->topic, job->topic))
-                g_ptr_array_remove_index(titles, i);
+        /* die Suche findet das Wort auch in fremden Sendungen; die Schreibweise des Namens
+         * unterscheidet sich zwischen den Mediatheken manchmal */
+        char *topic = g_utf8_casefold(job->topic, -1);
+        for (guint i = titles->len; i-- > 0;) {
+            char *other = g_utf8_casefold(((MdTitle *)titles->pdata[i])->topic, -1);
+            if (strcmp(other, topic)) g_ptr_array_remove_index(titles, i);
+            g_free(other);
+        }
+        g_free(topic);
         job->items = g_ptr_array_new_with_free_func(item_free);
         add_items(job->items, titles, job->dir);
     }
@@ -2032,7 +2064,6 @@ static void load_series(Group *group)
     SeriesJob *job = g_new0(SeriesJob, 1);
     job->key = g_strdup(group->key);
     job->topic = g_strdup(group->name);
-    job->source = group->source;
     job->dir = g_strdup(ui.cfg.dir);
     job->min_minutes = ui.cfg.min_minutes;
     job->hide_variants = !ui.cfg.show_signed;
@@ -5047,7 +5078,7 @@ static GtkWidget *add_check_option(GtkWidget *box, const char *text, bool active
 static char *check_display_path(const char *path)
 {
     size_t length = strlen(ui.cfg.dir);
-    if (g_str_has_prefix(path, ui.cfg.dir) && path[length] == '/')
+    if (g_str_has_prefix(path, ui.cfg.dir) && G_IS_DIR_SEPARATOR(path[length]))
         return g_filename_display_name(path + length + 1);
     return g_filename_display_name(path);
 }
@@ -5281,6 +5312,7 @@ static void on_choose_cache_clicked(GtkButton *b, gpointer d)
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
 static GtkWidget *quality_combo, *encoder_combo, *gpu_spin, *cpu_spin, *parallel_spin;
 static GtkWidget *convert_spin, *av1_switch, *keep_switch, *signed_switch, *min_spin;
+static GtkWidget *update_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
@@ -5298,6 +5330,7 @@ static void on_setting_changed(GtkWidget *w, gpointer d)
     c->convert = gtk_switch_get_active(GTK_SWITCH(av1_switch));
     c->keep_original = gtk_switch_get_active(GTK_SWITCH(keep_switch));
     c->show_signed = gtk_switch_get_active(GTK_SWITCH(signed_switch));
+    c->update_check = gtk_switch_get_active(GTK_SWITCH(update_switch));
     apply_queue_settings();
     settings_save();
     update_settings_rows();
@@ -5378,6 +5411,17 @@ static GtkWidget *build_settings_page(void)
     add_row(search, "Fassungen mit Gebärdensprache anzeigen",
             "Die Einblendung ist fest im Bild, darum sind das eigene Einträge.", NULL,
             signed_switch, NULL);
+
+    GtkWidget *updates = add_group(page, "Updates");
+    update_switch = new_setting_switch(c->update_check);
+    char *installed = g_strdup_printf("Installiert ist Version %s. Neue Versionen kommen von "
+                                      "GitHub und werden vor dem Installieren geprüft.",
+                                      MD_VERSION);
+    add_row(updates, "Beim Start nach Updates suchen", installed, NULL, update_switch, NULL);
+    g_free(installed);
+    GtkWidget *check = gtk_button_new_with_label("Jetzt suchen");
+    gtk_actionable_set_action_name(GTK_ACTIONABLE(check), "app.check-update");
+    add_row(updates, "Nach Updates suchen", NULL, NULL, check, NULL);
     return scrolled;
 }
 
@@ -5496,9 +5540,9 @@ static gboolean on_close_after_signal(gpointer d)
     return G_SOURCE_REMOVE;
 }
 
-/* SIGINT/SIGTERM/SIGHUP (z. B. beim Abmelden): geordnet beenden. Ein offener Dialog oder ein
- * offenes Menü hält das Hauptfenster gesperrt und wird darum zuerst geschlossen. */
-static gboolean on_unix_signal(gpointer d)
+/* SIGINT/SIGTERM/SIGHUP (z. B. beim Abmelden) oder Update: geordnet beenden. Ein offener Dialog
+ * oder ein offenes Menü hält das Hauptfenster gesperrt und wird darum zuerst geschlossen. */
+static gboolean on_quit_request(gpointer d)
 {
     (void)d;
     ui.quitting = true;
@@ -5518,6 +5562,238 @@ static void on_info_bar_response(GtkInfoBar *info_bar, gint response, gpointer d
     (void)response;
     (void)d;
     gtk_info_bar_set_revealed(info_bar, FALSE);
+}
+
+/* --- Updates ------------------------------------------------------------- */
+enum { UPDATE_INSTALL = 1, UPDATE_NOTES, UPDATE_SKIP, UPDATE_RESTART };
+
+typedef struct {
+    bool manual;                /* über Menü oder Knopf: auch "aktuell" und Fehler melden */
+    MdUpdate *update;
+    char *error, *path;
+} UpdateJob;
+
+static void update_job_free(UpdateJob *job)
+{
+    md_update_free(job->update);
+    g_free(job->error);
+    g_free(job->path);
+    g_free(job);
+}
+
+/* Leiste mit Text und passenden Knöpfen zeigen */
+static void show_update_bar(GtkMessageType type, const char *text, bool can_install,
+                            bool can_skip)
+{
+    gtk_info_bar_set_message_type(GTK_INFO_BAR(ui.update_bar), type);
+    set_label_text(ui.update_label, text);
+    gtk_widget_set_visible(ui.update_install, can_install);
+    gtk_widget_set_visible(ui.update_notes, ui.update != NULL);
+    gtk_widget_set_visible(ui.update_skip_button, can_skip);
+    gtk_widget_show(ui.update_bar);
+    gtk_info_bar_set_revealed(GTK_INFO_BAR(ui.update_bar), TRUE);
+}
+
+static gboolean on_update_checked(gpointer data)
+{
+    UpdateJob *job = data;
+    ui.update_busy = false;
+    if (job->update && (job->manual || g_strcmp0(job->update->version, ui.cfg.update_skip))) {
+        md_update_free(ui.update);
+        ui.update = g_steal_pointer(&job->update);
+        /* ohne Datei für dieses System oder ohne Prüfsumme nur der Hinweis auf die Seite */
+        bool installable = ui.update->file_url && ui.update->sums_url;
+        char *text = g_strdup_printf("Version %s ist da (installiert ist %s).%s",
+                                     ui.update->version, MD_VERSION, installable ? ""
+                                     : " Sie lässt sich nur von der Release-Seite laden.");
+        gtk_button_set_label(GTK_BUTTON(ui.update_install), "Installieren");
+        show_update_bar(GTK_MESSAGE_INFO, text, installable, true);
+        g_free(text);
+    } else if (job->manual && job->error) {
+        show_update_bar(GTK_MESSAGE_WARNING, job->error, false, false);
+    } else if (job->manual) {
+        char *text = g_strdup_printf("Version %s ist aktuell.", MD_VERSION);
+        show_update_bar(GTK_MESSAGE_INFO, text, false, false);
+        g_free(text);
+    } else if (job->error) {
+        md_log("Update-Suche: %s", job->error);
+    }
+    update_job_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer update_check_thread(gpointer data)
+{
+    UpdateJob *job = data;
+    job->update = md_update_check(&job->error);
+    g_idle_add(on_update_checked, job);
+    return NULL;
+}
+
+static void start_update_check(bool manual)
+{
+    if (ui.update_busy) return;
+    ui.update_busy = true;
+    UpdateJob *job = g_new0(UpdateJob, 1);
+    job->manual = manual;
+    g_thread_unref(g_thread_new("update", update_check_thread, job));
+}
+
+/* kurz nach dem Start: Fenster und Vorschau zuerst */
+static gboolean on_update_timer(gpointer d)
+{
+    (void)d;
+    if (ui.cfg.update_check) start_update_check(false);
+    return G_SOURCE_REMOVE;
+}
+
+static void on_action_check_update(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    start_update_check(true);
+}
+
+#ifndef G_OS_WIN32
+/* pkexec/apt-get fertig (Linux) */
+static void on_update_installed(GPid pid, gint status, gpointer d)
+{
+    (void)d;
+    g_spawn_close_pid(pid);
+    ui.update_busy = false;
+    if (g_spawn_check_wait_status(status, NULL)) {
+        char *text = g_strdup_printf("Version %s ist installiert und gilt nach einem Neustart.",
+                                     ui.update->version);
+        gtk_button_set_label(GTK_BUTTON(ui.update_install), "Neu starten");
+        show_update_bar(GTK_MESSAGE_INFO, text, true, false);
+        g_free(text);
+        md_update_free(ui.update);
+        ui.update = NULL;
+    } else {
+        show_update_bar(GTK_MESSAGE_WARNING, "Die Installation wurde abgebrochen oder ist "
+                        "fehlgeschlagen. Alternativ im Terminal: sudo apt update && sudo apt "
+                        "upgrade", true, true);
+    }
+}
+#endif
+
+/* Datei geladen und geprüft: installieren */
+static gboolean on_update_downloaded(gpointer data)
+{
+    UpdateJob *job = data;
+    if (!job->path) {
+        ui.update_busy = false;
+        show_update_bar(GTK_MESSAGE_WARNING, job->error, true, true);
+        update_job_free(job);
+        return G_SOURCE_REMOVE;
+    }
+    char *error = NULL;
+#ifdef G_OS_WIN32
+    /* Der Installer wartet, bis dieses Programm beendet ist, und ersetzt dann die Dateien */
+    char *argv[] = {job->path, "/UPDATE", NULL};
+    if (md_launch_detached(argv, &error)) {
+        on_quit_request(NULL);
+    } else {
+        ui.update_busy = false;
+        show_update_bar(GTK_MESSAGE_WARNING, error, true, true);
+    }
+#else
+    char *argv[] = {"pkexec", "apt-get", "install", "-y", job->path, NULL};
+    GPid pid = 0;
+    GError *err = NULL;
+    if (g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, NULL,
+                      NULL, &pid, &err)) {
+        set_label_text(ui.update_label, "Bitte die Installation bestätigen …");
+        g_child_watch_add(pid, on_update_installed, NULL);
+    } else {
+        ui.update_busy = false;
+        error = g_strdup_printf("pkexec fehlt. Im Terminal installieren: sudo apt install %s",
+                                job->path);
+        show_update_bar(GTK_MESSAGE_WARNING, error, false, true);
+        g_clear_error(&err);
+    }
+#endif
+    g_free(error);
+    update_job_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer update_download_thread(gpointer data)
+{
+    UpdateJob *job = data;
+    job->path = md_update_download(job->update, &job->error);
+    g_idle_add(on_update_downloaded, job);
+    return NULL;
+}
+
+#ifndef G_OS_WIN32
+/* Neu starten, sobald dieses Programm beendet ist (sonst übernimmt es den neuen Start) */
+static void restart_after_update(void)
+{
+    char *script = g_strdup_printf("while kill -0 %d 2>/dev/null; do sleep 0.3; done; "
+                                   "exec mediathek-downloader", (int)getpid());
+    char *argv[] = {"sh", "-c", script, NULL};
+    if (md_launch_detached(argv, NULL)) on_quit_request(NULL);
+    g_free(script);
+}
+#endif
+
+static void on_update_bar_response(GtkInfoBar *bar, gint response, gpointer d)
+{
+    (void)d;
+    if (response == UPDATE_INSTALL && !ui.update) {
+#ifndef G_OS_WIN32
+        restart_after_update();
+#endif
+        return;
+    }
+    if (response == UPDATE_INSTALL && !ui.update_busy) {
+        ui.update_busy = true;
+        UpdateJob *job = g_new0(UpdateJob, 1);
+        job->update = g_new0(MdUpdate, 1);
+        *job->update = (MdUpdate){
+            .version = g_strdup(ui.update->version), .file_name = g_strdup(ui.update->file_name),
+            .file_url = g_strdup(ui.update->file_url), .sums_url = g_strdup(ui.update->sums_url),
+            .file_size = ui.update->file_size};
+        char *size = md_format_size((double)ui.update->file_size);
+        char *text = g_strdup_printf("Version %s wird geladen (%s) …", ui.update->version, size);
+        show_update_bar(GTK_MESSAGE_INFO, text, false, false);
+        g_free(text);
+        g_free(size);
+        g_thread_unref(g_thread_new("update-laden", update_download_thread, job));
+    } else if (response == UPDATE_NOTES && ui.update) {
+        gtk_show_uri_on_window(GTK_WINDOW(ui.win), ui.update->page, GDK_CURRENT_TIME, NULL);
+    } else if (response == UPDATE_SKIP && ui.update) {
+        g_free(ui.cfg.update_skip);
+        ui.cfg.update_skip = g_strdup(ui.update->version);
+        settings_save();
+        gtk_info_bar_set_revealed(bar, FALSE);
+    } else if (response == GTK_RESPONSE_CLOSE) {
+        gtk_info_bar_set_revealed(bar, FALSE);
+    }
+}
+
+/* Leiste für Updates, getrennt von den übrigen Meldungen */
+static GtkWidget *build_update_bar(void)
+{
+    ui.update_bar = gtk_info_bar_new();
+    gtk_info_bar_set_show_close_button(GTK_INFO_BAR(ui.update_bar), TRUE);
+    ui.update_install = gtk_info_bar_add_button(GTK_INFO_BAR(ui.update_bar), "Installieren",
+                                                UPDATE_INSTALL);
+    ui.update_notes = gtk_info_bar_add_button(GTK_INFO_BAR(ui.update_bar), "Was ist neu?",
+                                              UPDATE_NOTES);
+    ui.update_skip_button = gtk_info_bar_add_button(GTK_INFO_BAR(ui.update_bar),
+                                                    "Überspringen", UPDATE_SKIP);
+    gtk_widget_set_no_show_all(ui.update_install, TRUE);
+    gtk_widget_set_no_show_all(ui.update_notes, TRUE);
+    gtk_widget_set_no_show_all(ui.update_skip_button, TRUE);
+    g_signal_connect(ui.update_bar, "response", G_CALLBACK(on_update_bar_response), NULL);
+    ui.update_label = new_label("", NULL);
+    set_wrapping(ui.update_label, 90);
+    gtk_container_add(GTK_CONTAINER(gtk_info_bar_get_content_area(GTK_INFO_BAR(ui.update_bar))),
+                      ui.update_label);
+    return ui.update_bar;
 }
 
 static void on_action_open_log(GSimpleAction *a, GVariant *p, gpointer d)
@@ -5542,16 +5818,15 @@ static void on_action_about(GSimpleAction *a, GVariant *p, gpointer d)
     (void)a;
     (void)p;
     (void)d;
+    char *comments = g_strdup_printf(
+        "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und weiteren für den privaten "
+        "Gebrauch – mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch als AV1. "
+        "Suche über MediathekViewWeb.\n"
+        "Information courtesy of IMDb (https://www.imdb.com). Used with permission.\n"
+        "Einstellungen, Verlauf und Protokoll: %s", md_app_dir());
     gtk_show_about_dialog(GTK_WINDOW(ui.win), "program-name", APP_NAME, "version", MD_VERSION,
-                          "logo-icon-name", "mediathek-downloader", "comments",
-                          "Lädt Filme und Serien aus den Mediatheken von ZDF, ARD und 3sat für den "
-                          "privaten Gebrauch "
-                          "– mit Pause, Tempolimit, allen Sprachen und Untertiteln und auf Wunsch "
-                          "als AV1. Suche über MediathekViewWeb.\n"
-                          "Information courtesy of IMDb (https://www.imdb.com). "
-                          "Used with permission.\n"
-                          "Einstellungen, Verlauf und Protokoll: ~/.mediathek-downloader",
-                          NULL);
+                          "logo-icon-name", "mediathek-downloader", "comments", comments, NULL);
+    g_free(comments);
 }
 
 static void on_action_quit(GSimpleAction *a, GVariant *p, gpointer d)
@@ -5570,6 +5845,7 @@ static void on_startup(GApplication *app, gpointer d)
     static const GActionEntry actions[] = {
         {.name = "open-log", .activate = on_action_open_log},
         {.name = "open-data", .activate = on_action_open_data},
+        {.name = "check-update", .activate = on_action_check_update},
         {.name = "about", .activate = on_action_about},
         {.name = "quit", .activate = on_action_quit},
     };
@@ -5583,6 +5859,7 @@ static GtkWidget *build_menu_button(void)
     GMenu *menu = g_menu_new(), *about = g_menu_new();
     g_menu_append(menu, "Protokoll öffnen", "app.open-log");
     g_menu_append(menu, "Datenordner öffnen", "app.open-data");
+    g_menu_append(about, "Nach Updates suchen", "app.check-update");
     g_menu_append(about, "Über Mediathek Downloader", "app.about");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(about));
     GtkWidget *menu_button = gtk_menu_button_new();
@@ -5657,6 +5934,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_container_add(GTK_CONTAINER(gtk_info_bar_get_content_area(GTK_INFO_BAR(ui.infobar))),
                       ui.info_label);
     gtk_box_pack_start(GTK_BOX(vbox), ui.infobar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), build_update_bar(), FALSE, FALSE, 0);
     ui.stack = gtk_stack_new();
     gtk_stack_set_transition_type(GTK_STACK(ui.stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
     gtk_stack_set_transition_duration(GTK_STACK(ui.stack), 180);
@@ -5686,6 +5964,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     g_signal_connect(ui.stack, "notify::visible-child", G_CALLBACK(on_stack_page_changed), NULL);
     gtk_widget_show_all(ui.win);
     gtk_widget_hide(ui.infobar);
+    gtk_widget_hide(ui.update_bar);
     gtk_widget_hide(ui.preview_spinner);
     gtk_widget_set_no_show_all(ui.preview_spinner, TRUE);
     gtk_widget_hide(ui.header_spinner);
@@ -5708,21 +5987,26 @@ static void on_activate(GtkApplication *app, gpointer d)
     on_tick(NULL);
     start_preview_load(MD_CACHE_USE);
     g_thread_unref(g_thread_new("gpu", gpu_check_thread, NULL));
+    g_timeout_add_seconds(UPDATE_DELAY_SECONDS, on_update_timer, NULL);
     gtk_widget_grab_focus(ui.preview_search);
 }
 
 int main(int argc, char **argv)
 {
+#ifdef G_OS_UNIX
     signal(SIGPIPE, SIG_IGN);
+#endif
     md_init(true);
     g_set_prgname("mediathek-downloader");
     g_set_application_name(APP_NAME);
     ui.app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(ui.app, "startup", G_CALLBACK(on_startup), NULL);
     g_signal_connect(ui.app, "activate", G_CALLBACK(on_activate), NULL);
-    g_unix_signal_add(SIGINT, on_unix_signal, NULL);
-    g_unix_signal_add(SIGTERM, on_unix_signal, NULL);
-    g_unix_signal_add(SIGHUP, on_unix_signal, NULL);
+#ifdef G_OS_UNIX
+    g_unix_signal_add(SIGINT, on_quit_request, NULL);
+    g_unix_signal_add(SIGTERM, on_quit_request, NULL);
+    g_unix_signal_add(SIGHUP, on_quit_request, NULL);
+#endif
     int rc = g_application_run(G_APPLICATION(ui.app), argc, argv);
     md_shutdown();
     g_object_unref(ui.app);
