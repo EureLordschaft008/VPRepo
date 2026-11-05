@@ -64,6 +64,15 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.0.1 (06.11.2026)
+- Neu für Windows: Installer ohne Administratorrechte von der Release-Seite auf GitHub, mit GTK,
+  GStreamer, ffmpeg und curl. Die GPU-Umwandlung nutzt dort NVENC, QSV oder AMF.
+- Updates: Kurz nach dem Start fragt das Programm bei GitHub nach einer neuen Version und
+  installiert sie auf Wunsch, nach Prüfung der Prüfsumme. Abschaltbar in den Einstellungen.
+- Eine Staffel lädt alle verfügbaren Folgen, auch wenn sie aus verschiedenen Mediatheken stammen.
+- ORF, DW, Internet Archive und Wikimedia Commons entfallen.
+- Version 2.0.0 wurde nie veröffentlicht.
+
 ### 1.9.0 (05.11.2026)
 - Neuer Reiter „Statistik“: Sehzeit je Tag, Wochentag und Uhrzeit, meistgesehene und
   meistgeladene Titel, Downloads je Monat und Platz auf der Festplatte.
