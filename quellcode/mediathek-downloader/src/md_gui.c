@@ -55,9 +55,10 @@
 #define NO_GENRE "Ohne Kategorie"
 #define MD_SOURCE_ALL_1_4 7     /* so stand "Alle" früher in den Einstellungen */
 #define MD_SOURCE_ALL_1_5 511
+#define MD_SOURCE_ALL_1_6 1023
 #define IMDB_THREADS 2
 #define ALL_LANGUAGES "Alle Sprachen"
-#define SOURCE_COUNT 10
+#define SOURCE_COUNT 17
 #define WATCH_FILE "wiedergabe.tsv"
 #define WATCHED_SHARE 0.95      /* ab diesem Anteil gilt eine Datei als gesehen (Abspann) */
 #define RESUME_MIN_SECONDS 10   /* kürzer angeschaut zählt nicht als angefangen */
@@ -67,10 +68,12 @@
 #define TILES_PER_LINE_MAX 24   /* auch sehr breite Fenster füllen sich mit Kacheln */
 #define COMPACT_TABS_WIDTH 1040 /* schmaler: Reiter nur als Symbole */
 
-static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ZDFNEO, MD_SOURCE_ARD,
-                                              MD_SOURCE_ONE, MD_SOURCE_WDR, MD_SOURCE_SWR,
-                                              MD_SOURCE_NDR, MD_SOURCE_RBB, MD_SOURCE_3SAT,
-                                              MD_SOURCE_NETZKINO};
+static const int SOURCE_BITS[SOURCE_COUNT] = {MD_SOURCE_ZDF, MD_SOURCE_ZDFNEO, MD_SOURCE_ZDFTIVI,
+                                              MD_SOURCE_ARD, MD_SOURCE_ONE, MD_SOURCE_WDR,
+                                              MD_SOURCE_SWR, MD_SOURCE_NDR, MD_SOURCE_MDR,
+                                              MD_SOURCE_BR, MD_SOURCE_RBB, MD_SOURCE_KIKA,
+                                              MD_SOURCE_3SAT, MD_SOURCE_ARTE, MD_SOURCE_SRF,
+                                              MD_SOURCE_ORF, MD_SOURCE_NETZKINO};
 static const char *const KIND_TEXT[3] = {"Alles", "Filme", "Serien"};
 static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 min)",
                                             "Mittel (ca. 2,3 GB je 90 min)",
@@ -736,7 +739,8 @@ static void settings_load(void)
     c->limit_mb = CLAMP(settings_int(file, "LimitMBs", 10, 1, 1000), 1, 1000);
     c->limit_on = settings_bool(file, "LimitAktiv", false);
     c->sources = settings_int(file, "Mediatheken", MD_SOURCE_ALL, 1, MD_SOURCE_ALL);
-    if (c->sources == MD_SOURCE_ALL_1_4 || c->sources == MD_SOURCE_ALL_1_5)
+    if (c->sources == MD_SOURCE_ALL_1_4 || c->sources == MD_SOURCE_ALL_1_5 ||
+        c->sources == MD_SOURCE_ALL_1_6)
         c->sources = MD_SOURCE_ALL;
     c->convert = settings_bool(file, "AV1", false);
     c->keep_original = settings_bool(file, "OriginalBehalten", false);

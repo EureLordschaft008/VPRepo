@@ -1,7 +1,7 @@
-# Mediathek Downloader 1.7.0
+# Mediathek Downloader 1.8.0
 
-Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
-Netzkino –
+Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ZDFtivi, ARD, ONE, WDR, SWR, NDR, MDR,
+BR, rbb, KiKA, 3sat, ARTE, SRF, ORF und Netzkino –
 einzelne Folgen, ganze Staffeln oder eine Serie mit allen Staffeln auf einmal. Als Programm mit grafischer Oberfläche
 (`mediathek-downloader`, Aufbau und Optik wie beim AV1-Converter) und als Terminal-Version
 (`mediathek-downloader-cli`, z. B. für lange Läufe in tmux).
@@ -20,7 +20,7 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.7.0-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.8.0-1_amd64.deb
 ```
 
 Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl`, `ffmpeg`
@@ -113,7 +113,8 @@ mediathek-downloader-cli --serien --staffel 26 --laden alle --ziel ~/Videos/Medi
 ```
 
 Ohne `--laden` zeigt das Programm nur die Trefferliste mit dem Stand jedes Titels. Strg+C pausiert;
-derselbe Befehl macht dort weiter. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
+derselbe Befehl macht dort weiter. `--mediathek arte,srf` beschränkt die Suche auf einzelne
+Mediatheken. Alle Optionen: `mediathek-downloader-cli --help`. Die Warteschlange
 der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 ## Qualität und AV1
@@ -147,18 +148,24 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
 - **Titelbilder** kommen von den Seiten der Mediatheken. Eine Serie zeigt das Bild ihrer neuesten
   Folge. Viele ältere Titel haben keine Seite mehr, nur noch das Video; ihr Standbild kann
   unpassend sein.
-- **Kategorien** stammen beim ZDF von dessen Seiten. ARD und 3sat nennen keine; dort leitet das
+- **Kategorien** stammen beim ZDF von dessen Seiten. Die anderen Mediatheken nennen keine; dort leitet das
   Programm sie aus Stichwörtern ab, zum Beispiel Krimi bei „Tatort“. IMDb ergänzt alle Mediatheken,
   aber nur bei sicherem Titeltreffer. Eine Serie übernimmt die Kategorien ihrer neuesten Folge.
 - **Staffeln bei der ARD:** Nennt ein Titel nur „Folge 5“, zählt er zu Staffel 1. Serien ganz ohne
   Nummern wie der Tatort stehen unter „Einzelne Sendungen“.
-- **Andere Sender:** BR, HR, MDR, ARTE und weitere öffentlich-rechtliche Sender sind nicht dabei.
+- **ARTE, SRF und ORF** liefern Streams statt Dateien. Das Programm setzt sie mit ffmpeg zu einer
+  MP4-Datei zusammen, bei ARTE mit allen Sprachfassungen als Tonspuren. Ein pausierter Stream
+  beginnt beim Fortsetzen von vorn. Verschlüsselte Streams und Livesendungen lädt es nicht.
+- **SRF und ORF weltweit:** Nur Titel, die auch außerhalb der Schweiz bzw. Österreichs freigegeben
+  sind, erscheinen. Bei ARTE, SRF und ORF stehen Staffel und Folge oft nur als „(3/6)“ im Titel.
+- **Andere Sender:** HR, SR, Phoenix und weitere öffentlich-rechtliche Sender sind nicht dabei.
 - **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle, ihre
   Player sind auf Kopierschutz ausgelegt, und das Programm umgeht keinen Kopierschutz.
 - **Netzkino** liefert nur Filme, und nur solche ohne Kopierschutz und außerhalb von NetzkinoPlus.
   Länge und Größe nennt der Dienst nicht, die Qualitätsstufe wirkt dort nicht. Die Dateien sind oft
   sehr groß, teils über 10 GB. Netzkino finanziert sich über Werbung, die beim Download entfällt.
 - **Titelbilder bei WDR, SWR, NDR und rbb** sind Standbilder aus dem Video, und FSK fehlt dort.
+  Bei ARTE, SRF und ORF kommt das Bild nur von der Seite; ohne Seite bleibt der Titel ohne Bild.
 - **Titellisten** kommen von [MediathekViewWeb](https://mediathekviewweb.de), nicht von den Sendern.
   Ist dieser Dienst nicht erreichbar, gibt es keine Titel.
 - **Freie Suche** gibt es nur in der Terminal-Version. Die Vorschau zeigt die neuesten Titel, was

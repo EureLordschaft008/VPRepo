@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.7.0"
+#define MD_VERSION "1.8.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -21,7 +21,9 @@ typedef enum { MD_KIND_ALL, MD_KIND_FILMS, MD_KIND_SERIES } MdKind;
 typedef enum {
     MD_SOURCE_ZDF = 1, MD_SOURCE_ARD = 2, MD_SOURCE_3SAT = 4, MD_SOURCE_ZDFNEO = 8,
     MD_SOURCE_ONE = 16, MD_SOURCE_WDR = 32, MD_SOURCE_SWR = 64, MD_SOURCE_NDR = 128,
-    MD_SOURCE_RBB = 256, MD_SOURCE_NETZKINO = 512, MD_SOURCE_ALL = 1023
+    MD_SOURCE_RBB = 256, MD_SOURCE_NETZKINO = 512, MD_SOURCE_ARTE = 1024, MD_SOURCE_MDR = 2048,
+    MD_SOURCE_BR = 4096, MD_SOURCE_SRF = 8192, MD_SOURCE_ORF = 16384, MD_SOURCE_KIKA = 32768,
+    MD_SOURCE_ZDFTIVI = 65536, MD_SOURCE_ALL = 131071
 } MdSource;
 typedef enum { MD_QUALITY_HIGH, MD_QUALITY_MEDIUM, MD_QUALITY_LOW } MdQuality;
 typedef enum { MD_ENCODER_GPU, MD_ENCODER_CPU } MdEncoder;

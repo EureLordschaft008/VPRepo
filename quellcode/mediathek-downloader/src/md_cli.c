@@ -29,8 +29,8 @@ static const char USAGE[] =
     "  --serien               nur Serien\n"
     "  --mindestlaenge MIN    kürzere Einträge ausblenden (Standard 10)\n"
     "  --varianten            Fassungen mit Gebärdensprache anzeigen\n"
-    "  --mediathek LISTE      zdf, ard, 3sat, zdfneo, one, wdr, swr, ndr, rbb,\n"
-    "                         netzkino oder alle,\n"
+    "  --mediathek LISTE      zdf, zdfneo, zdftivi, ard, one, wdr, swr, ndr, mdr, br,\n"
+    "                         rbb, kika, 3sat, arte, srf, orf, netzkino oder alle,\n"
     "                         z. B. zdf,ard (Standard alle)\n"
     "  --staffel N            nur diese Staffel\n"
     "  --nur-fehlende         schon geladene Titel ausblenden\n"
@@ -99,6 +99,13 @@ static int parse_sources(const char *text)
         else if (!g_ascii_strcasecmp(parts[i], "ndr")) sources |= MD_SOURCE_NDR;
         else if (!g_ascii_strcasecmp(parts[i], "rbb")) sources |= MD_SOURCE_RBB;
         else if (!g_ascii_strcasecmp(parts[i], "netzkino")) sources |= MD_SOURCE_NETZKINO;
+        else if (!g_ascii_strcasecmp(parts[i], "arte")) sources |= MD_SOURCE_ARTE;
+        else if (!g_ascii_strcasecmp(parts[i], "mdr")) sources |= MD_SOURCE_MDR;
+        else if (!g_ascii_strcasecmp(parts[i], "br")) sources |= MD_SOURCE_BR;
+        else if (!g_ascii_strcasecmp(parts[i], "srf")) sources |= MD_SOURCE_SRF;
+        else if (!g_ascii_strcasecmp(parts[i], "orf")) sources |= MD_SOURCE_ORF;
+        else if (!g_ascii_strcasecmp(parts[i], "kika")) sources |= MD_SOURCE_KIKA;
+        else if (!g_ascii_strcasecmp(parts[i], "zdftivi")) sources |= MD_SOURCE_ZDFTIVI;
         else if (!g_ascii_strcasecmp(parts[i], "alle")) sources = MD_SOURCE_ALL;
         else {
             fprintf(stderr, "Unbekannte Mediathek %s\n", parts[i]);
@@ -148,7 +155,7 @@ static void print_titles(GPtrArray *titles, const char *dir)
             append_labels(tracks, t->subtitles);
             g_string_append_c(tracks, ']');
         }
-        printf("%4u  %-4s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, md_source_label(t->source),
+        printf("%4u  %-8s  %-14s  %-24.24s  %3d min  %s%s\n", i + 1, md_source_label(t->source),
                STATUS_TEXT[md_title_status(t, dir, NULL)], t->topic, t->duration / 60, t->title,
                tracks->str);
         g_string_free(tracks, TRUE);

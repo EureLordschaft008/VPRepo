@@ -70,6 +70,15 @@
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
 #define PAGE_RECHECK_SECONDS (7 * 24 * 3600)    /* Seite ohne Bild/Kategorie neu prüfen */
 #define COVER_SIZE "384x216"
+#define COVER_WIDTH_TEXT "384"
+#define COVER_ARTE_PREFIX "https://api-cdn.arte.tv/img/v2/image/"
+#define COVER_ARD_PAGE_PREFIX "https://www.ardmediathek.de/img?"
+#define COVER_SRF_PREFIX "https://il.srgssr.ch/images/"
+#define COVER_ORF_PREFIX "https://api-tvthek.orf.at/assets/"
+#define COVER_KIKA_PREFIX "https://www.kika.de/"
+/* Seiten mit og:image, aber ohne Kategorien */
+#define COVER_OTHER_PAGES "https://www.arte.tv/", "https://www.srf.ch/play/", \
+                          "https://on.orf.at/", COVER_KIKA_PREFIX
 #define COVER_3SAT_PAGE "https://www.3sat.de/"
 #define COVER_3SAT_PREFIX "https://www.3sat.de/assets/"
 #define COVER_ARD_PAGE "https://www.ardmediathek.de/"
@@ -94,6 +103,9 @@
 #define RATE_TOLERANCE 0.05         /* kleinere Änderungen starten curl nicht neu */
 #define MAX_FAILURES 5              /* Verbindungsfehler in Folge ohne Fortschritt */
 #define RETRY_WAIT_MS 5000
+#define HLS_AUDIO_BITRATE 128000    /* Bit/s je Tonspur, für das Tempolimit von Streams */
+/* übliche Datenrate je Qualität (Video und Ton), für Schätzungen */
+static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define MIN_FREE_SPACE (512 * 1024 * 1024LL)    /* Reserve auf dem Ziellaufwerk */
 #define NAME_MAX_BYTES 180
 #define FILE_MAX_BYTES 230          /* Reserve zu 255 für .part und die versteckten Temp-Namen */
@@ -112,11 +124,13 @@ static const struct {
     const char *tag, *label, *lang;
 } VARIANTS[] = {
     {"(Audiodeskription)", "Audiodeskription", "deu"}, {"(Hörfassung)", "Audiodeskription", "deu"},
+    {"(AD)", "Audiodeskription", "deu"},
     {"(Englisch)", "Englisch", "eng"}, {"(Französisch)", "Französisch", "fra"},
     {"(Spanisch)", "Spanisch", "spa"}, {"(Italienisch)", "Italienisch", "ita"},
     {"(Dänisch)", "Dänisch", "dan"}, {"(Schwedisch)", "Schwedisch", "swe"},
     {"(Norwegisch)", "Norwegisch", "nor"}, {"(Originalfassung)", "Originalfassung", "und"},
     {"(Originalversion)", "Originalfassung", "und"},
+    {"(Originalversion mit Untertitel)", "Originalfassung", "und"},
 };
 
 /* Mediatheken: Suchwort für den Sender und Name in den Daten (ZDF: auch "ZDF-tivi" …) */
@@ -134,6 +148,13 @@ static const struct {
     {MD_SOURCE_NDR, "ndr", "NDR", "NDR"},
     {MD_SOURCE_RBB, "rbb", "RBB", "rbb"},
     {MD_SOURCE_NETZKINO, NULL, "Netzkino", "Netzkino"},
+    {MD_SOURCE_ARTE, "arte.de", "ARTE.DE", "ARTE"},
+    {MD_SOURCE_MDR, "mdr", "MDR", "MDR"},
+    {MD_SOURCE_BR, "br", "BR", "BR"},
+    {MD_SOURCE_SRF, "srf", "SRF", "SRF"},
+    {MD_SOURCE_ORF, "orf", "ORF", "ORF"},
+    {MD_SOURCE_KIKA, "kika", "KiKA", "KiKA"},
+    {MD_SOURCE_ZDFTIVI, "zdf-tivi", "ZDF-tivi", "ZDFtivi"},
 };
 
 /* Netzkino steht nicht in der Suche: Filmlisten der eigenen Schnittstelle, ohne NetzkinoPlus */
@@ -143,8 +164,12 @@ static const struct {
 static const int NETZKINO_CATEGORIES[] = {1, 3, 4, 5, 6, 10, 18, 32, 35, 51, 71, 10333};
 
 /* Mediatheken, deren Titel gleich aufgebaut sind */
-#define ZDF_STYLE (MD_SOURCE_ZDF | MD_SOURCE_ZDFNEO)
+#define ZDF_STYLE (MD_SOURCE_ZDF | MD_SOURCE_ZDFNEO | MD_SOURCE_ZDFTIVI)
 #define ARD_STYLE (MD_SOURCE_ARD | MD_SOURCE_ONE)
+/* Folgen als "Serie (3/6)"; ARTE und der BR nennen dazu nur eine Rubrik als Thema */
+#define PART_STYLE (MD_SOURCE_ARTE | MD_SOURCE_BR | MD_SOURCE_ORF | MD_SOURCE_SRF)
+/* Mediatheken, die (teils) nur HLS-Streams anbieten; die übrigen haben Dateien */
+#define HLS_SOURCES (MD_SOURCE_ARTE | MD_SOURCE_SRF | MD_SOURCE_ORF)
 
 /* Rubriken, deren Einträge Filme sind (Stöbern ohne Suchbegriff) */
 static const char *const FILM_TOPICS[] = {"Filme", "Spielfilme", "Spielfilm-Highlights",
@@ -169,6 +194,7 @@ typedef struct {
     bool convert, keep_original;
     MdEncoder encoder;
     int gpu_quality, cpu_rf;
+    MdQuality quality;              /* für HLS: welche Stufe der Wiedergabeliste */
 
     MdJobState state;
     bool paused, remove_requested;
@@ -329,7 +355,9 @@ static void child_setup(gpointer data)
 static int run_capture(char **argv, char **out, char **err)
 {
     int status = 0;
-    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, out, err, &status, NULL))
+    /* child_setup: endet das Programm, endet auch das Werkzeug */
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, child_setup, NULL, out, err, &status,
+                      NULL))
         return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
@@ -553,23 +581,85 @@ static bool url_allowed(const char *url)
     return g_str_has_prefix(url, "https://") || g_str_has_prefix(url, "http://");
 }
 
+/* HLS-Wiedergabeliste statt Datei? */
+static bool is_hls(const char *url)
+{
+    const char *end = strpbrk(url, "?#");
+    size_t length = end ? (size_t)(end - url) : strlen(url);
+    return length >= 5 && !g_ascii_strncasecmp(url + length - 5, ".m3u8", 5);
+}
+
+/* Adressen, die aus Deutschland nicht abrufbar sind, und Streams ohne Unterstützung leeren */
+static void drop_unusable_urls(MdTitle *t)
+{
+    char **urls[] = {&t->url_high, &t->url_medium, &t->url_low};
+    for (size_t i = 0; i < G_N_ELEMENTS(urls); i++) {
+        const char *url = *urls[i];
+        bool usable = url_allowed(url) && (!is_hls(url) || (t->source & HLS_SOURCES));
+        if (t->source == MD_SOURCE_ORF) usable &= !strstr(url, "/cms-austria/");
+        if (t->source == MD_SOURCE_SRF) usable &= strstr(url, "/world/") != NULL;
+        if (!usable) **urls[i] = 0;
+    }
+}
+
+/* "Haus aus Glas (3/6) - Das Verschwinden": Folge 3. Die Staffel steht beim ORF im Thema
+ * ("Soko Donau Staffel 10"), sonst gilt Staffel 1. Ist das Thema nur eine Rubrik wie
+ * "Fernsehfilme und Serien - Serien", wird der Serienname zum Thema. */
+static void part_analyse(MdTitle *t, GRegex *part, GRegex *topic_season)
+{
+    GMatchInfo *match = NULL;
+    if (!g_regex_match(part, t->name, 0, &match)) {
+        g_match_info_free(match);
+        return;
+    }
+    char *number = g_match_info_fetch(match, 1);
+    int start = 0;
+    g_match_info_fetch_pos(match, 0, &start, NULL);
+    char *series = g_strndup(t->name, (gsize)start);
+    g_strstrip(series);
+    t->episode = atoi(number);
+    t->season = 1;
+    g_free(number);
+    g_clear_pointer(&match, g_match_info_free);
+    if (g_regex_match(topic_season, t->topic, 0, &match)) {
+        char *season = g_match_info_fetch(match, 1);
+        g_match_info_fetch_pos(match, 0, &start, NULL);
+        t->season = atoi(season);
+        t->topic[start] = 0;
+        g_free(season);
+    }
+    g_match_info_free(match);
+    char *topic = g_utf8_strdown(t->topic, -1), *lower = g_utf8_strdown(series, -1);
+    if (*series && !strstr(topic, lower)) {
+        g_free(t->topic);
+        t->topic = g_strdup(series);
+    }
+    char *rest = g_regex_replace_literal(part, t->name, -1, 0, "", 0, NULL);
+    g_free(t->name);
+    t->name = g_strstrip(rest);
+    g_free(topic);
+    g_free(lower);
+    g_free(series);
+}
+
 /* Staffel, Folge und bereinigten Namen aus dem Titel ableiten */
 static void title_analyse(MdTitle *t)
 {
-    static GRegex *episode_tag, *new_episodes, *numbered, *show_suffix;
+    static GRegex *episode_tag, *new_episodes, *numbered, *show_suffix, *srf_tag, *part;
+    static GRegex *topic_season;
     static gsize once;
     if (g_once_init_enter(&once)) {
         episode_tag = g_regex_new(" ?\\(S(\\d+)/E(\\d+)\\)", 0, 0, NULL);
+        srf_tag = g_regex_new("( –)? ?\\(Staffel (\\d+), Folge (\\d+)\\)", 0, 0, NULL);
+        part = g_regex_new(" \\((\\d+)/(\\d+)\\)", 0, 0, NULL);
+        topic_season = g_regex_new(" Staffel (\\d+)$", 0, 0, NULL);
         new_episodes = g_regex_new(" - Neue Folgen?\\b", 0, 0, NULL);
         numbered = g_regex_new("^Folge (\\d+)\\b|\\((\\d+)\\)$", 0, 0, NULL);
         show_suffix = g_regex_new(" · .*$", 0, 0, NULL);
         g_once_init_leave(&once, 1);
     }
     t->source = source_of(t->channel);
-    /* Streams lassen sich nicht wie Dateien laden */
-    char **urls[] = {&t->url_high, &t->url_medium, &t->url_low};
-    for (size_t i = 0; i < G_N_ELEMENTS(urls); i++)
-        if (g_str_has_suffix(*urls[i], ".m3u8") || !url_allowed(*urls[i])) **urls[i] = 0;
+    drop_unusable_urls(t);
     if (!url_allowed(t->url_subtitle)) *t->url_subtitle = 0;
     if (!url_allowed(t->website)) *t->website = 0;
     t->season = t->episode = -1;
@@ -582,7 +672,17 @@ static void title_analyse(MdTitle *t)
         g_free(episode);
     }
     g_clear_pointer(&match, g_match_info_free);
-    char *without_tag = g_regex_replace_literal(episode_tag, t->title, -1, 0, "", 0, NULL);
+    if (t->season < 0 && g_regex_match(srf_tag, t->title, 0, &match)) {
+        char *season = g_match_info_fetch(match, 2), *episode = g_match_info_fetch(match, 3);
+        t->season = atoi(season);
+        t->episode = atoi(episode);
+        g_free(season);
+        g_free(episode);
+    }
+    g_clear_pointer(&match, g_match_info_free);
+    char *without_srf = g_regex_replace_literal(srf_tag, t->title, -1, 0, "", 0, NULL);
+    char *without_tag = g_regex_replace_literal(episode_tag, without_srf, -1, 0, "", 0, NULL);
+    g_free(without_srf);
     t->name = g_regex_replace_literal(new_episodes, without_tag, -1, 0, "", 0, NULL);
     g_free(without_tag);
     for (size_t i = 0; i < G_N_ELEMENTS(VARIANTS); i++) {
@@ -600,7 +700,9 @@ static void title_analyse(MdTitle *t)
         t->name = short_name;
     }
 
-    t->is_variant = strstr(t->title, "Gebärdensprache") != NULL;
+    if (t->season < 0 && (t->source & PART_STYLE)) part_analyse(t, part, topic_season);
+    /* ARTE: eingeblendete Untertitel sind ein eigenes Bild wie die Gebärdensprache */
+    t->is_variant = strstr(t->title, "Gebärdensprache") || strstr(t->title, "(mit Untertitel)");
     char *topic = g_utf8_strdown(t->topic, -1);
     t->is_film = t->season < 0 && (strstr(topic, "film") || strstr(topic, "fernsehspiel")
                                    || strstr(topic, "kino"));
@@ -901,6 +1003,13 @@ static void merge_variants(GPtrArray *raw)
         g_free(key);
         if (!main_title || ABS(main_title->duration - t->duration) > VARIANT_MAX_DIFFERENCE)
             continue;
+        /* Ein HLS-Stream bringt alle Sprachen selbst mit: die Fassung nicht noch einmal laden */
+        if (is_hls(md_title_url(main_title, MD_QUALITY_LOW))) {
+            add_subtitle(main_title, t);
+            md_title_free(t);
+            raw->pdata[i] = NULL;
+            continue;
+        }
         bool known = false;
         for (guint n = 0; n < main_title->audio->len; n++)
             known |= !strcmp(((MdTrack *)main_title->audio->pdata[n])->label, t->track_label);
@@ -1219,8 +1328,7 @@ const char *md_title_url(const MdTitle *t, MdQuality quality)
 
 gint64 md_title_estimate(const MdTitle *t, MdQuality quality)
 {
-    static const double KBIT_PER_SECOND[] = {6660, 3360, 808};
-    return (gint64)(t->duration * KBIT_PER_SECOND[quality] * 1000 / 8);
+    return (gint64)(t->duration * QUALITY_KBIT_PER_SECOND[quality] * 1000 / 8);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1526,10 +1634,46 @@ static char *text_after(const char *page, const char *key)
     return end ? g_strndup(start, (gsize)(end - start)) : NULL;
 }
 
+/* Wert von name=… in einer Adresse durch value ersetzen */
+static char *replace_parameter(const char *url, const char *name, const char *value)
+{
+    const char *found = strstr(url, name);
+    if (!found) return g_strdup(url);
+    const char *end = strchr(found, '&');
+    return g_strdup_printf("%.*s%s%s%s", (int)(found - url), url, name, value, end ? end : "");
+}
+
+/* Bilder von ARTE, SRF, ORF, KiKA und der ARD-Mediathek in kleiner Größe; NULL = unbekannt */
+static char *other_cover_url(const char *raw)
+{
+    char *url = g_strdup(raw), *amp;
+    while ((amp = strstr(url, "&amp;"))) memmove(amp + 1, amp + 5, strlen(amp + 5) + 1);
+    char *result = NULL;
+    if (!url_allowed(url)) {
+        /* keine Webadresse */
+    } else if (g_str_has_prefix(url, COVER_ARTE_PREFIX)) {
+        char *size = strstr(url, "/1920x1080");    /* ohne "?type=TEXT": kein Schriftzug */
+        if (size) result = g_strdup_printf("%.*s/" COVER_SIZE, (int)(size - url), url);
+    } else if (g_str_has_prefix(url, COVER_ARD_PAGE_PREFIX)) {
+        result = replace_parameter(url, "imwidth=", COVER_WIDTH_TEXT);
+    } else if (g_str_has_prefix(url, COVER_SRF_PREFIX)) {
+        result = replace_parameter(url, "width=", COVER_WIDTH_TEXT);
+    } else if (g_str_has_prefix(url, COVER_ORF_PREFIX) ||
+               g_str_has_prefix(url, COVER_KIKA_PREFIX)) {
+        result = g_strdup(url);
+    }
+    g_free(url);
+    return result;
+}
+
 /* Adresse des Bildes in der kleinen Größe; NULL = die Seite nennt keines */
 static char *cover_url(const char *page)
 {
     char *url = text_after(page, "\"thumbnailUrl\":\""), *result = NULL;
+    if (url && strchr(url, '\\')) {             /* SRF: JSON-maskiert, og:image ist sauber */
+        g_free(url);
+        url = NULL;
+    }
     if (!url) url = text_after(page, "property=\"og:image\" content=\"");
     if (!url) return NULL;
     char *tilde = strrchr(url, '~'), *layout = strstr(url, "layout=");
@@ -1544,6 +1688,8 @@ static char *cover_url(const char *page)
         const char *rest = strchr(layout, '&');
         *layout = 0;
         result = g_strconcat(url, "layout=" COVER_SIZE, rest ? rest : "", NULL);
+    } else {
+        result = other_cover_url(url);
     }
     g_free(url);
     return result;
@@ -1694,10 +1840,11 @@ static char *page_info(const char *website)
         g_free(path);
         return saved;
     }
-    bool ard = g_str_has_prefix(website, COVER_ARD_PAGE);
-    if (!ard && !g_str_has_prefix(website, COVER_PAGE_PREFIX) &&
-        !g_str_has_prefix(website, COVER_3SAT_PAGE))
-        return NULL;
+    static const char *const PAGES[] = {COVER_PAGE_PREFIX, COVER_3SAT_PAGE, COVER_OTHER_PAGES};
+    bool ard = g_str_has_prefix(website, COVER_ARD_PAGE), known = ard;
+    for (size_t i = 0; !known && i < G_N_ELEMENTS(PAGES); i++)
+        known = g_str_has_prefix(website, PAGES[i]);
+    if (!known) return NULL;
     char *path = cache_file(website, ".info"), *info = NULL;
     if (g_file_get_contents(path, &info, NULL, NULL) && !page_info_stale(info, path)) {
         g_free(path);
@@ -1822,10 +1969,11 @@ char *md_default_cover_dir(void)
     return g_build_filename(md_app_dir(), "bilder", NULL);
 }
 
-/* Die Seite nennt kein Bild: Standbild aus dem Video holen */
+/* Die Seite nennt kein Bild: Standbild aus dem Video holen. Nicht bei Streams: ffmpeg lädt dort
+ * jedes Teilstück bis zur Sprungmarke und belegt minutenlang einen der Bild-Threads. */
 static void cover_from_video(const char *video, const char *path)
 {
-    if (!url_allowed(video)) return;
+    if (!url_allowed(video) || is_hls(video)) return;
     char *tmp = g_strconcat(path, ".part", NULL);
     char *argv[] = {"ffmpeg", "-nostdin", "-v", "error", "-rw_timeout", "20000000",
                     "-ss", COVER_FRAME_SECONDS, "-i", (char *)video, "-frames:v", "1",
@@ -2179,10 +2327,11 @@ static void queue_save(void)
         char *label = g_strescape(j->main_label, NULL), *lang = g_strescape(j->main_lang, NULL);
         char *key = g_strescape(j->key, NULL), *topic = g_strescape(j->topic, NULL);
         g_string_append_printf(out, "%d\t%d\t%d\t%d\t%d\t%d\t%" G_GINT64_FORMAT
-                               "\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+                               "\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\n",
                                state, j->convert, j->keep_original, j->encoder, j->gpu_quality,
                                j->cpu_rf, j->total, title, url, target, message, j->skip_main_audio,
-                               label, lang, extras_text, key, topic, j->season, j->episode);
+                               label, lang, extras_text, key, topic, j->season, j->episode,
+                               j->quality);
         g_free(key);
         g_free(topic);
         g_free(extras);
@@ -2230,7 +2379,8 @@ static void queue_load(void)
     }
     for (int i = 1; lines[i]; i++) {
         char **f = g_strsplit(lines[i], "\t", -1);
-        if (g_strv_length(f) == 19) {
+        guint fields = g_strv_length(f);
+        if (fields == 19 || fields == 20) {    /* bis 1.7.0 ohne Qualität */
             Job *j = g_new0(Job, 1);
             j->id = ++q.next_id;
             j->state = (MdJobState)CLAMP(atoi(f[0]), MD_JOB_WAITING, MD_JOB_FAILED);
@@ -2251,6 +2401,8 @@ static void queue_load(void)
             j->topic = g_strcompress(f[16]);
             j->season = atoi(f[17]);
             j->episode = atoi(f[18]);
+            j->quality = fields == 20 ? (MdQuality)CLAMP(atoi(f[19]), MD_QUALITY_HIGH,
+                                                          MD_QUALITY_LOW) : MD_QUALITY_HIGH;
             j->extras = g_ptr_array_new_with_free_func(extra_free);
             char *extras = g_strcompress(f[14]);
             extras_from_text(j, extras);
@@ -2562,6 +2714,359 @@ static void download_subtitle(Job *j, const Extra *e, const char *path)
     g_free(part);
 }
 
+/* ffmpeg-Fortschritt aus dem Puffer lesen; verarbeitete Zeilen entfernen */
+static void parse_progress(GString *buffer, double *seconds, double *factor)
+{
+    char *newline;
+    while ((newline = strchr(buffer->str, '\n'))) {
+        *newline = 0;
+        if (!strncmp(buffer->str, "out_time_us=", 12) || !strncmp(buffer->str, "out_time_ms=", 12)) {
+            double value = g_ascii_strtod(buffer->str + 12, NULL);
+            if (value > 0) *seconds = value / 1e6;
+        } else if (!strncmp(buffer->str, "speed=", 6)) {
+            double value = g_ascii_strtod(buffer->str + 6, NULL);
+            if (value > 0) *factor = value;
+        }
+        g_string_erase(buffer, 0, newline + 1 - buffer->str);
+    }
+}
+
+/* Pipe lesen, ohne zu blockieren */
+static void drain_pipe(int fd, GString *buffer)
+{
+    char chunk[4096];
+    ssize_t n;
+    while ((n = read(fd, chunk, sizeof chunk)) > 0) g_string_append_len(buffer, chunk, n);
+}
+
+/* Argument an die Befehlszeile anhängen */
+static void arg_add(GPtrArray *argv, const char *text)
+{
+    g_ptr_array_add(argv, g_strdup(text));
+}
+
+/* Mehrere feste Argumente anhängen (NULL-terminiert) */
+static void args_add(GPtrArray *argv, const char *const *texts)
+{
+    for (; *texts; texts++) arg_add(argv, *texts);
+}
+
+/* ---------------------------------------------------------------------------
+ * HLS-Streams (ARTE, SRF, ORF)
+ *
+ * ffmpeg lädt die Wiedergabeliste und schreibt Bild und alle Tonspuren in die MP4-Datei. Eine
+ * angefangene Datei lässt sich nicht fortsetzen: nach einer Pause beginnt der Stream von vorn.
+ * Verschlüsselte Streams (EXT-X-KEY) und Livestreams werden nicht geladen.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    char *uri, *name, *lang;
+} HlsAudio;
+
+/* Wert eines Attributs einer #EXT-X-Zeile; NULL = fehlt */
+static char *hls_attribute(const char *line, const char *name)
+{
+    size_t length = strlen(name);
+    for (const char *p = strchr(line, ':'); p && *p; p = strchr(p + 1, ',')) {
+        const char *key = p + 1;
+        if (strncmp(key, name, length) || key[length] != '=') continue;
+        const char *value = key + length + 1;
+        if (*value == '"') {
+            const char *close = strchr(value + 1, '"');
+            return close ? g_strndup(value + 1, (gsize)(close - value - 1)) : NULL;
+        }
+        return g_strndup(value, strcspn(value, ","));
+    }
+    return NULL;
+}
+
+/* relative Adresse aus der Liste base auflösen; NULL = keine Webadresse */
+static char *hls_resolve(const char *base, const char *uri)
+{
+    char *url = g_uri_resolve_relative(base, uri, G_URI_FLAGS_NONE, NULL);
+    if (url && !url_allowed(url)) g_clear_pointer(&url, g_free);
+    return url;
+}
+
+static void hls_audio_free(gpointer data)
+{
+    HlsAudio *a = data;
+    g_free(a->uri);
+    g_free(a->name);
+    g_free(a->lang);
+    g_free(a);
+}
+
+/* Wiedergabeliste holen -> Text, NULL = Fehler (*error gesetzt) */
+static char *hls_fetch(const char *url, char **error)
+{
+    char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "30", "-A", USER_AGENT, "--url",
+                    (char *)url, NULL};
+    char *out = NULL;
+    int rc = run_capture(argv, &out, NULL);
+    if (rc == 0 && out && g_str_has_prefix(out, "#EXTM3U")) return out;
+    g_free(out);
+    *error = g_strdup(rc == 22 ? "Das Video ist nicht mehr abrufbar oder aus Deutschland gesperrt."
+                               : "Der Server ist nicht erreichbar.");
+    return NULL;
+}
+
+/* zweibuchstabige Sprache der Liste -> ISO 639-2 */
+static const char *hls_language(const char *code)
+{
+    static const char *const CODES[][2] = {{"de", "deu"}, {"fr", "fra"}, {"en", "eng"},
+                                           {"es", "spa"}, {"it", "ita"}, {"pl", "pol"}};
+    for (size_t i = 0; code && i < G_N_ELEMENTS(CODES); i++)
+        if (!g_ascii_strcasecmp(code, CODES[i][0])) return CODES[i][1];
+    return code && strlen(code) == 3 ? code : "und";
+}
+
+/* Stufe einer Hauptliste wählen: höchste Bildhöhe bis zur Grenze der Qualität, bei gleicher
+ * Höhe H.264. -> Adresse der Teilliste; *audio_group und *bandwidth dazu. */
+static char *hls_pick_variant(const char *master, const char *base, MdQuality quality,
+                              char **audio_group, gint64 *bandwidth)
+{
+    static const int MAX_HEIGHT[] = {1080, 720, 480};
+    char **lines = g_strsplit(master, "\n", -1), *best = NULL;
+    int best_height = -1;
+    bool best_avc = false, best_fits = false;
+    for (int i = 0; lines[i]; i++) {
+        g_strchomp(lines[i]);
+        if (!g_str_has_prefix(lines[i], "#EXT-X-STREAM-INF:") || !lines[i + 1]) continue;
+        char *resolution = hls_attribute(lines[i], "RESOLUTION");
+        char *codecs = hls_attribute(lines[i], "CODECS");
+        char *bw = hls_attribute(lines[i], "AVERAGE-BANDWIDTH");
+        if (!bw) bw = hls_attribute(lines[i], "BANDWIDTH");
+        const char *x = resolution ? strchr(resolution, 'x') : NULL;
+        int height = x ? atoi(x + 1) : 0;
+        bool avc = !codecs || strstr(codecs, "avc1"), fits = height <= MAX_HEIGHT[quality];
+        /* passende Höhe vor zu großer; darin die größte, sonst die kleinste */
+        bool better = !best || (fits && !best_fits)
+                      || (fits == best_fits && (fits ? height > best_height
+                                                     : height < best_height))
+                      || (height == best_height && avc && !best_avc);
+        g_strchomp(lines[i + 1]);
+        char *uri = better ? hls_resolve(base, lines[i + 1]) : NULL;
+        if (uri) {
+            g_free(best);
+            best = uri;
+            best_height = height;
+            best_avc = avc;
+            best_fits = fits;
+            g_free(*audio_group);
+            *audio_group = hls_attribute(lines[i], "AUDIO");
+            *bandwidth = bw ? g_ascii_strtoll(bw, NULL, 10) : 0;
+        }
+        g_free(resolution);
+        g_free(codecs);
+        g_free(bw);
+    }
+    g_strfreev(lines);
+    return best;
+}
+
+/* Tonspuren der Gruppe group mit eigener Liste */
+static GPtrArray *hls_audio_tracks(const char *master, const char *base, const char *group)
+{
+    GPtrArray *tracks = g_ptr_array_new_with_free_func(hls_audio_free);
+    char **lines = g_strsplit(master, "\n", -1);
+    for (int i = 0; group && lines[i]; i++) {
+        g_strchomp(lines[i]);
+        if (!g_str_has_prefix(lines[i], "#EXT-X-MEDIA:")) continue;
+        char *type = hls_attribute(lines[i], "TYPE"), *id = hls_attribute(lines[i], "GROUP-ID");
+        char *uri = hls_attribute(lines[i], "URI");
+        if (type && id && uri && !strcmp(type, "AUDIO") && !strcmp(id, group)) {
+            HlsAudio *a = g_new0(HlsAudio, 1);
+            a->uri = hls_resolve(base, uri);
+            a->name = hls_attribute(lines[i], "NAME");
+            a->lang = hls_attribute(lines[i], "LANGUAGE");
+            if (a->uri) g_ptr_array_add(tracks, a);
+            else hls_audio_free(a);
+        }
+        g_free(type);
+        g_free(id);
+        g_free(uri);
+    }
+    g_strfreev(lines);
+    return tracks;
+}
+
+/* Teilliste prüfen -> Länge in Sekunden, 0 = Fehler (*error gesetzt) */
+static double hls_duration(const char *url, char **error)
+{
+    char *text = hls_fetch(url, error);
+    if (!text) return 0;
+    double seconds = 0;
+    bool encrypted = false;
+    char **lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i]; i++) {
+        if (g_str_has_prefix(lines[i], "#EXTINF:")) seconds += g_ascii_strtod(lines[i] + 8, NULL);
+        if (g_str_has_prefix(lines[i], "#EXT-X-KEY:") && !strstr(lines[i], "METHOD=NONE"))
+            encrypted = true;
+    }
+    if (encrypted)
+        *error = g_strdup("Der Stream ist verschlüsselt und wird nicht geladen.");
+    else if (!strstr(text, "#EXT-X-ENDLIST"))
+        *error = g_strdup("Das ist ein Livestream, kein abrufbares Video.");
+    else if (seconds <= 0)
+        *error = g_strdup("Die Wiedergabeliste ist leer.");
+    g_strfreev(lines);
+    g_free(text);
+    return *error ? 0 : seconds;
+}
+
+/* ffmpeg-Aufruf: ein Eingang je Liste, Bild aus dem ersten, Ton aus allen übrigen */
+static GPtrArray *hls_command(const char *video, GPtrArray *audio, double readrate,
+                              const char *part)
+{
+    GPtrArray *argv = g_ptr_array_new_with_free_func(g_free);
+    args_add(argv, (const char *const[]){"ffmpeg", "-nostdin", "-v", "error", "-nostats",
+                                         "-progress", "pipe:1", "-y", NULL});
+    char rate[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_formatd(rate, sizeof rate, "%.2f", readrate);
+    for (guint i = 0; i <= audio->len; i++) {
+        const char *url = i ? ((HlsAudio *)audio->pdata[i - 1])->uri : video;
+        args_add(argv, (const char *const[]){"-protocol_whitelist", "http,https,tls,tcp",
+                                             "-user_agent", USER_AGENT, NULL});
+        if (readrate > 0) args_add(argv, (const char *const[]){"-readrate", rate, NULL});
+        args_add(argv, (const char *const[]){"-i", url, NULL});
+    }
+    args_add(argv, (const char *const[]){"-map", "0:v:0", NULL});
+    if (!audio->len) args_add(argv, (const char *const[]){"-map", "0:a?", NULL});
+    for (guint i = 0; i < audio->len; i++) {
+        const HlsAudio *a = audio->pdata[i];
+        char *map = g_strdup_printf("%u:a:0", i + 1), *key = g_strdup_printf("-metadata:s:a:%u", i);
+        char *lang = g_strdup_printf("language=%s", hls_language(a->lang));
+        char *title = g_strdup_printf("title=%s", a->name ? a->name : "");
+        /* MP4 bewahrt den Namen nur als handler_name */
+        char *handler = g_strdup_printf("handler_name=%s", a->name ? a->name : "");
+        args_add(argv, (const char *const[]){"-map", map, key, lang, key, title, key, handler,
+                                             NULL});
+        g_free(handler);
+        g_free(map);
+        g_free(key);
+        g_free(lang);
+        g_free(title);
+    }
+    args_add(argv, (const char *const[]){"-c", "copy", "-f", "mp4", part, NULL});
+    g_ptr_array_add(argv, NULL);
+    return argv;
+}
+
+/* ffmpeg begleiten -> Exit-Code, -1 = unterbrochen. Fortschritt nach der Zeit im Video */
+static int watch_hls(Job *j, GPtrArray *argv, const char *part, double duration, gint64 base,
+                     char **messages)
+{
+    GPid pid = 0;
+    int out_fd = -1, err_fd = -1;
+    if (!g_spawn_async_with_pipes(NULL, (char **)argv->pdata, NULL,
+                                  G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, child_setup,
+                                  NULL, &pid, NULL, &out_fd, &err_fd, NULL)) {
+        *messages = g_strdup("ffmpeg lässt sich nicht starten.");
+        return 1;
+    }
+    fcntl(out_fd, F_SETFL, O_NONBLOCK);
+    fcntl(err_fd, F_SETFL, O_NONBLOCK);
+    GString *progress = g_string_new(NULL), *errors = g_string_new(NULL);
+    double seconds = 0, factor = 0, last_time = now_seconds();
+    gint64 last_size = 0;
+    int status = 0, rc = -1;
+    bool interrupted = false;
+    for (;;) {
+        struct pollfd fds[2] = {{out_fd, POLLIN, 0}, {err_fd, POLLIN, 0}};
+        poll(fds, 2, POLL_MS);
+        drain_pipe(out_fd, progress);
+        drain_pipe(err_fd, errors);
+        parse_progress(progress, &seconds, &factor);
+        if (errors->len > 2000) g_string_erase(errors, 0, errors->len - 2000);
+        gint64 size = MAX(file_size(part), 0);
+        double now = now_seconds(), share = MIN(seconds / duration, 1.0);
+
+        g_mutex_lock(&q.lock);
+        gint64 estimate = share > 0.01 ? (gint64)(size / share) : 0;
+        if (estimate) j->total = base + estimate;
+        j->have = base + size;
+        j->progress = share;
+        if (now - last_time >= 0.8) {
+            double current = MAX(size - last_size, 0) / (now - last_time);
+            j->speed = j->speed > 0 ? 0.7 * j->speed + 0.3 * current : current;
+            j->remaining = factor > 0 ? (duration - seconds) / factor : -1;
+            last_size = size;
+            last_time = now;
+        }
+        interrupted = job_interrupted(j);
+        g_mutex_unlock(&q.lock);
+
+        if (interrupted) {
+            stop_child(pid);
+            break;
+        }
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            drain_pipe(err_fd, errors);
+            rc = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
+            break;
+        }
+    }
+    close(out_fd);
+    close(err_fd);
+    g_string_free(progress, TRUE);
+    *messages = g_strstrip(g_string_free(errors, FALSE));
+    return interrupted ? -1 : rc;
+}
+
+/* HLS-Stream nach path laden -> true = fertig; false = unterbrochen oder Fehler (*error) */
+static bool download_hls(Job *j, const char *url, const char *path, gint64 base, char **error)
+{
+    char *master = hls_fetch(url, error);
+    if (!master) return false;
+    char *video = NULL, *group = NULL;
+    gint64 bandwidth = 0;
+    if (strstr(master, "#EXT-X-STREAM-INF:"))
+        video = hls_pick_variant(master, url, j->quality, &group, &bandwidth);
+    else video = g_strdup(url);
+    if (!bandwidth) bandwidth = (gint64)(QUALITY_KBIT_PER_SECOND[j->quality] * 1000);
+    GPtrArray *audio = hls_audio_tracks(master, url, group);
+    double duration = video ? hls_duration(video, error) : 0;
+    if (!video && !*error) *error = g_strdup("Die Wiedergabeliste enthält kein Video.");
+    /* auch die Tonspuren dürfen nicht verschlüsselt sein */
+    for (guint i = 0; i < audio->len && !*error; i++)
+        hls_duration(((HlsAudio *)audio->pdata[i])->uri, error);
+    char *part = g_strconcat(path, ".part", NULL);
+    bool complete = false;
+    for (int failures = 0; !*error;) {
+        g_mutex_lock(&q.lock);
+        bool interrupted = job_interrupted(j);
+        gint64 rate = rate_per_download();
+        g_mutex_unlock(&q.lock);
+        if (interrupted) break;
+        /* Tempolimit über die Lesegeschwindigkeit: Vielfaches der Abspielzeit */
+        double bytes_per_second = (bandwidth + HLS_AUDIO_BITRATE * (gint64)audio->len) / 8.0;
+        double readrate = rate > 0 && bytes_per_second > 0 ? MAX(rate / bytes_per_second, 0.1) : 0;
+        GPtrArray *argv = hls_command(video, audio, readrate, part);
+        char *messages = NULL;
+        int rc = watch_hls(j, argv, part, duration, base, &messages);
+        g_ptr_array_free(argv, TRUE);
+        if (rc == 0 && file_size(part) > 0) {
+            complete = g_rename(part, path) == 0;
+            if (!complete) *error = g_strdup("Die fertige Datei lässt sich nicht umbenennen.");
+        } else if (rc > 0) {
+            md_log("Stream unterbrochen (ffmpeg %d): %s – %s", rc, j->title, messages);
+            if (++failures >= MAX_FAILURES)
+                *error = g_strdup_printf("Der Stream lässt sich nicht laden: %s",
+                                         *messages ? messages : "ffmpeg-Fehler");
+            else retry_wait(j);
+        }
+        g_free(messages);
+        if (rc <= 0 || complete) break;
+    }
+    g_unlink(part);                                 /* ein Stream beginnt immer von vorn */
+    g_ptr_array_free(audio, TRUE);
+    g_free(part);
+    g_free(video);
+    g_free(group);
+    g_free(master);
+    return complete;
+}
+
 /* Größe mit bis zu drei Versuchen erfragen, 0 = Fehler */
 static gint64 remote_size_retry(Job *j, const char *url, char **error)
 {
@@ -2596,7 +3101,7 @@ static gpointer download_thread(gpointer data)
         gint64 missing = 0;
         for (guint i = 0; i < count && !error; i++) {
             const Extra *e = i ? j->extras->pdata[i - 1] : NULL;
-            if (e && e->subtitle) continue;
+            if ((e && e->subtitle) || is_hls(e ? e->url : j->url)) continue;
             sizes[i] = remote_size_retry(j, e ? e->url : j->url, &error);
             total += sizes[i];
             char *path = e ? extra_path(j->target, i - 1, false) : g_strdup(j->target);
@@ -2619,6 +3124,10 @@ static gpointer download_thread(gpointer data)
             char *path = e ? extra_path(j->target, i - 1, e->subtitle) : g_strdup(j->target);
             if (e && e->subtitle) {
                 if (file_size(path) <= 0) download_subtitle(j, e, path);
+            } else if (is_hls(e ? e->url : j->url)) {
+                if (file_size(path) <= 0)
+                    complete = download_hls(j, e ? e->url : j->url, path, base, &error);
+                sizes[i] = MAX(file_size(path), 0);
             } else if (file_size(path) != sizes[i]) {
                 complete = download_file(j, e ? e->url : j->url, path, sizes[i], base, &error);
             }
@@ -2698,43 +3207,6 @@ static bool media_info(const char *path, char **codec, double *duration)
     g_strfreev(lines);
     g_free(out);
     return ok && *codec && *duration > 0;
-}
-
-/* ffmpeg-Fortschritt aus dem Puffer lesen; verarbeitete Zeilen entfernen */
-static void parse_progress(GString *buffer, double *seconds, double *factor)
-{
-    char *newline;
-    while ((newline = strchr(buffer->str, '\n'))) {
-        *newline = 0;
-        if (!strncmp(buffer->str, "out_time_us=", 12) || !strncmp(buffer->str, "out_time_ms=", 12)) {
-            double value = g_ascii_strtod(buffer->str + 12, NULL);
-            if (value > 0) *seconds = value / 1e6;
-        } else if (!strncmp(buffer->str, "speed=", 6)) {
-            double value = g_ascii_strtod(buffer->str + 6, NULL);
-            if (value > 0) *factor = value;
-        }
-        g_string_erase(buffer, 0, newline + 1 - buffer->str);
-    }
-}
-
-/* Pipe lesen, ohne zu blockieren */
-static void drain_pipe(int fd, GString *buffer)
-{
-    char chunk[4096];
-    ssize_t n;
-    while ((n = read(fd, chunk, sizeof chunk)) > 0) g_string_append_len(buffer, chunk, n);
-}
-
-/* Argument an die Befehlszeile anhängen */
-static void arg_add(GPtrArray *argv, const char *text)
-{
-    g_ptr_array_add(argv, g_strdup(text));
-}
-
-/* Mehrere feste Argumente anhängen (NULL-terminiert) */
-static void args_add(GPtrArray *argv, const char *const *texts)
-{
-    for (; *texts; texts++) arg_add(argv, *texts);
 }
 
 /* Name und Sprache der Ausgabespur setzen; kind = 'a' oder 's' */
@@ -3160,6 +3632,7 @@ guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
     j->convert = o->convert;
     j->keep_original = o->keep_original;
     j->encoder = o->encoder;
+    j->quality = o->quality;
     j->gpu_quality = o->gpu_quality;
     j->cpu_rf = o->cpu_rf;
     j->state = MD_JOB_WAITING;
