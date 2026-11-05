@@ -64,6 +64,15 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 1.7.0 (05.11.2026)
+- Neuer Reiter „Meine Videos“: alles Geladene als Kacheln mit Bild, „Weiterschauen“ und „Zuletzt
+  geladen“, Serien mit Staffeln und Folgen, gesehen/ungesehen per rechter Maustaste.
+- Eingebauter Player (GStreamer): setzt an der letzten Stelle fort, spielt die nächste Folge,
+  Ton- und Untertitelwahl, Vollbild und Tastensteuerung.
+- Die Suche nach neuen Folgen zeigt deutlich, welche Serie gerade geprüft wird und wie weit sie
+  ist, dazu ein Spinner in der Titelleiste.
+- Schmale Fenster: Leisten brechen um, die Reiter werden zu Symbolen.
+
 ### 1.6.2 (31.10.2026)
 - Adressen aus Antworten der Mediatheken werden geprüft, curl nutzt nur noch HTTP und HTTPS.
 - Sehr lange Serien- und Folgentitel führen nicht mehr zu einem zu langen Dateinamen.
