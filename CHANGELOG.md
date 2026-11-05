@@ -64,6 +64,12 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 1.8.0 (05.11.2026)
+- Sieben neue Mediatheken: ARTE, MDR, BR, SRF, ORF, KiKA und ZDFtivi.
+- ARTE, SRF und ORF kommen als Stream und werden zu MP4 zusammengesetzt, bei ARTE mit allen
+  Sprachfassungen als Tonspuren. Verschlüsselte Streams und Livesendungen lädt das Programm nicht.
+- Bei SRF und ORF erscheinen nur weltweit freigegebene Titel.
+
 ### 1.7.0 (05.11.2026)
 - Neuer Reiter „Meine Videos“: alles Geladene als Kacheln mit Bild, „Weiterschauen“ und „Zuletzt
   geladen“, Serien mit Staffeln und Folgen, gesehen/ungesehen per rechter Maustaste.
