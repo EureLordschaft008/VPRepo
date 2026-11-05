@@ -1440,6 +1440,7 @@ MdHistoryEntry *md_history_snapshot(int *count)
         entries[n].topic = g_strdup(h->e.topic);
         entries[n].title = g_strdup(h->e.title);
         entries[n].path = g_strdup(h->e.path);
+        entries[n].is_film = g_str_has_prefix(h->key, "film|");
         n++;
     }
     g_mutex_unlock(&q.lock);
@@ -1788,6 +1789,32 @@ void md_set_cover_dir(const char *dir)
     g_free(cover_dir);
     cover_dir = g_strdup(dir);
     g_mutex_unlock(&cover_lock);
+}
+
+char *md_video_frame(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return NULL;
+    /* Größe und Änderungszeit im Schlüssel: eine ersetzte Datei bekommt ein neues Bild */
+    char *key = g_strdup_printf("%s|%" G_GINT64_FORMAT "|%" G_GINT64_FORMAT, path,
+                                (gint64)st.st_size, (gint64)st.st_mtime);
+    char *frame = cache_file(key, ".bild.jpg");
+    g_free(key);
+    /* kurze Dateien haben nach drei Minuten kein Bild mehr */
+    const char *const offsets[] = {COVER_FRAME_SECONDS, "20", "0"};
+    for (size_t i = 0; i < G_N_ELEMENTS(offsets) && file_size(frame) <= 0; i++) {
+        char *tmp = g_strconcat(frame, ".part", NULL);
+        char *argv[] = {"ffmpeg", "-nostdin", "-v", "error", "-ss", (char *)offsets[i],
+                        "-i", (char *)path, "-frames:v", "1", "-vf",
+                        "scale=" COVER_FRAME_WIDTH ":-2", "-q:v", "4", "-f", "image2", "-y",
+                        tmp, NULL};
+        if (run_capture(argv, NULL, NULL) != 0 || file_size(tmp) <= 0 || g_rename(tmp, frame) != 0)
+            g_unlink(tmp);
+        g_free(tmp);
+    }
+    if (file_size(frame) > 0) return frame;
+    g_free(frame);
+    return NULL;
 }
 
 char *md_default_cover_dir(void)

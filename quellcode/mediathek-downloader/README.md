@@ -1,4 +1,4 @@
-# Mediathek Downloader 1.6.2
+# Mediathek Downloader 1.7.0
 
 Lädt Filme und Serien aus den Mediatheken von ZDF, ZDFneo, ARD, ONE, WDR, SWR, NDR, rbb, 3sat und
 Netzkino –
@@ -20,11 +20,11 @@ sudo apt install mediathek-downloader
 Oder direkt aus der Paketdatei:
 
 ```bash
-sudo apt install ./mediathek-downloader_1.6.2-1_amd64.deb
+sudo apt install ./mediathek-downloader_1.7.0-1_amd64.deb
 ```
 
-Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl` und
-`ffmpeg`; `apt` installiert beides mit.
+Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es braucht `curl`, `ffmpeg`
+und für den eingebauten Player GStreamer; `apt` installiert alles mit.
 
 ## Was es kann
 
@@ -59,7 +59,21 @@ Das Programm steht danach im Startmenü unter **Unterhaltungsmedien**. Es brauch
 - **Neue Folgen** – die gleichnamige Seite listet alle Serien, von denen du schon etwas geladen hast
   und die seit dem letzten Download neue Folgen bekommen haben, auch wenn sie nicht in der Vorschau
   stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In Vorschau und Bibliothek markiert
-  ein kleines grünes „!“ dieselben Serien.
+  ein kleines grünes „!“ dieselben Serien. Während der Suche zeigt die Seite, welche Serie gerade
+  dran ist und wie weit es ist; ein Spinner in der Titelleiste zeigt es auf allen Seiten.
+- **Meine Videos** – alles Geladene als Kacheln wie in einer Mediathek: oben „Weiterschauen“ und
+  „Zuletzt geladen“ zum seitlichen Blättern, darunter Serien und Filme von A bis Z. Eine Serie
+  öffnet sich mit ihren Staffeln und Folgen; der große Knopf spielt die angefangene oder die nächste
+  ungesehene Folge. Bilder kommen von der Mediathek, sonst als Standbild aus der Datei. Die rechte
+  Maustaste markiert als gesehen oder ungesehen und öffnet Ordner oder ein anderes Programm.
+- **Player** – spielt die Dateien im eigenen Fenster, auch AV1. Er merkt sich, wo eine Datei
+  aufgehört hat, macht dort weiter und startet am Ende die nächste Folge. Ton und Untertitel sind
+  wählbar. Tasten: Leertaste Pause, ←/→ 10 Sekunden (ohne die Leiste einzublenden), ↑/↓ Lautstärke,
+  M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück. Ab 95 % gilt eine Datei als
+  gesehen. Der Stand liegt in `~/.mediathek-downloader/wiedergabe.tsv`.
+- **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
+  Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
+  bis etwa 520 Pixel schmal machen.
 - **Bibliothek** – alles Geladene nach Sendung, mit Größe, Datum, Abspielen und Ordner öffnen. Das
   Lupensymbol zeigt die fehlenden Folgen einer Serie in der Vorschau, sofern sie dort steht.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
@@ -169,7 +183,7 @@ pushen. GitHub Actions baut dann das Paket, legt das Release an und bringt es na
 
 ## Aus dem Quelltext bauen
 
-Gebraucht werden `gcc`, `make`, `libgtk-3-dev` und `dpkg-deb`.
+Gebraucht werden `gcc`, `make`, `libgtk-3-dev`, `libgstreamer1.0-dev` und `dpkg-deb`.
 
 ```bash
 make deb
@@ -183,6 +197,7 @@ nur, wenn `/etc/ld.so.preload` nichts vorlädt.
 |---|---|
 | `src/md_core.c` | Engine: Suche, Warteschlange, Download, Umwandlung, Verlauf |
 | `src/md_gui.c` | grafische Oberfläche (GTK 3) |
+| `src/md_player.c` | eingebauter Player (GStreamer) |
 | `src/md_cli.c` | Terminal-Version |
 | `data/` | Starter, Symbol, Paketbeschreibung |
 

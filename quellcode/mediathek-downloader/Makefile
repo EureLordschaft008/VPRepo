@@ -6,7 +6,7 @@
 #   make install    installiert nach $(PREFIX) (Standard: /usr/local, braucht sudo)
 #   make test       Regressionstests und kurzer Fuzz-Lauf (zusätzlich ASAN=1 für AddressSanitizer)
 
-VERSION  := 1.6.2
+VERSION  := 1.7.0
 DEBREV   := 1
 ARCH     := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 PREFIX   ?= /usr/local
@@ -19,13 +19,16 @@ GTK_CFLAGS := $(shell pkg-config --cflags gtk+-3.0)
 GTK_LIBS   := $(shell pkg-config --libs gtk+-3.0)
 GLIB_CFLAGS := $(shell pkg-config --cflags glib-2.0)
 GLIB_LIBS   := $(shell pkg-config --libs glib-2.0)
+GST_CFLAGS  ?= $(shell pkg-config --cflags gstreamer-1.0)
+GST_LIBS    ?= $(shell pkg-config --libs gstreamer-1.0)
 
 CORE := src/md_core.c src/md_core.h
 
 all: mediathek-downloader mediathek-downloader-cli
 
-mediathek-downloader: src/md_gui.c $(CORE)
-	$(CC) $(CFLAGS) $(GTK_CFLAGS) -o $@ src/md_gui.c src/md_core.c $(GTK_LIBS)
+mediathek-downloader: src/md_gui.c src/md_player.c src/md_player.h $(CORE)
+	$(CC) $(CFLAGS) $(GTK_CFLAGS) $(GST_CFLAGS) -o $@ src/md_gui.c src/md_player.c src/md_core.c \
+		$(GTK_LIBS) $(GST_LIBS)
 
 mediathek-downloader-cli: src/md_cli.c $(CORE)
 	$(CC) $(CFLAGS) $(GLIB_CFLAGS) -o $@ src/md_cli.c src/md_core.c $(GLIB_LIBS)

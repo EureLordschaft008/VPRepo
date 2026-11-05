@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "1.6.2"
+#define MD_VERSION "1.7.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -121,6 +121,7 @@ typedef struct {
     int season, episode;        /* -1 = keine Angabe */
     gint64 size, finished;      /* Bytes, Unix-Zeit */
     bool exists;                /* liegt die Datei noch dort? */
+    bool is_film;
 } MdHistoryEntry;
 
 /* --- Start und Ende ----------------------------------------------------- */
@@ -185,6 +186,9 @@ MdStatus md_title_status(const MdTitle *title, const char *dir, char **path);
 MdHistoryEntry *md_history_snapshot(int *count);
 void md_history_snapshot_free(MdHistoryEntry *entries, int count);
 void md_history_forget(const char *path);   /* Eintrag löschen, die Datei bleibt */
+/* Standbild aus einer geladenen Datei (blockiert, wird zwischengespeichert); NULL = keines.
+ * Freigeben mit g_free. */
+char *md_video_frame(const char *path);
 
 /* --- Anzeige ------------------------------------------------------------ */
 char *md_format_size(double bytes);         /* "3,2 GB" */
