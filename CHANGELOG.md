@@ -64,6 +64,14 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.1.0 (06.11.2026)
+- Die Downloadliste bleibt auch mit Tausenden Einträgen flüssig: Sie zeigt 100 Aufträge,
+  „Weitere anzeigen“ holt die nächsten. Laufendes steht oben, dann Fehlgeschlagenes, Wartendes
+  und Fertiges.
+- Ein fertiger oder fehlgeschlagener Download lässt das Programm nicht mehr sekundenlang stocken.
+- Neuer Knopf „Fehlgeschlagene entfernen“: nimmt alle Fehlschläge samt halbfertiger Dateien aus der
+  Liste.
+
 ### 2.0.1 (06.11.2026)
 - Neu für Windows: Installer ohne Administratorrechte von der Release-Seite auf GitHub, mit GTK,
   GStreamer, ffmpeg und curl. Die GPU-Umwandlung nutzt dort NVENC, QSV oder AMF.
