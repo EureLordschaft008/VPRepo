@@ -64,6 +64,21 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.2.0 (06.11.2026)
+- Der Player läuft im Hauptfenster statt in einem eigenen; im Vollbild verschwindet die Titelleiste.
+- Springen mit den Pfeiltasten blendet die Leiste nicht mehr ein, die Zeitleiste blinkt nicht mehr.
+  ↑/↓ regeln die Lautstärke mit kurzem Hinweis im Bild.
+- Zoom im Player: „Schwarze Balken ausblenden“ (Taste Z) findet fest eingebrannte Balken und füllt
+  das Fenster mit dem Inhalt; +/− zoomen stufenweise.
+- Tonspur (A) und Untertitel (S) lassen sich während der Wiedergabe wechseln. Das Einschalten der
+  Untertitel ließ den Player bisher hängen.
+- Die AV1-Umwandlung schneidet schwarze Balken im Bild ab.
+- Downloads und Umwandlung lassen sich getrennt anhalten.
+- Neue Einstellungen: mit dem Computer starten (minimiert) und neue Folgen geladener Serien
+  automatisch laden.
+- Titelbilder erscheinen schneller: Sie bleiben im Speicher, und Titel ohne Bild fragen nicht bei
+  jedem Laden erneut im Netz nach.
+
 ### 2.1.0 (06.11.2026)
 - Die Downloadliste bleibt auch mit Tausenden Einträgen flüssig: Sie zeigt 100 Aufträge,
   „Weitere anzeigen“ holt die nächsten. Laufendes steht oben, dann Fehlgeschlagenes, Wartendes
