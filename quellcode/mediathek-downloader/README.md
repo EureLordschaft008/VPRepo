@@ -120,6 +120,10 @@ das Update unter Linux auch über `sudo apt upgrade`.
   dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei.
 - **Pause** – einzeln oder alle. Auch nach dem Beenden oder einem Absturz geht es an derselben
   Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick.
+- **Downloadliste** – oben steht, was gerade läuft, dann Fehlgeschlagenes, Wartendes und zuletzt
+  Fertiges. Die Liste zeigt 100 Aufträge, „Weitere anzeigen“ holt die nächsten; so bleibt sie auch
+  mit Tausenden Einträgen flüssig. „Fertige entfernen“ räumt Erledigtes weg, „Fehlgeschlagene
+  entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
   des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.

@@ -46,6 +46,7 @@
 #define SETTINGS_FILE "einstellungen.ini"
 #define RESULT_ROWS_BATCH 200   /* Zeilen der Trefferliste auf einmal (weitere per Knopf) */
 #define TICK_MS 500
+#define JOB_ROWS_BATCH 100      /* Zeilen der Downloadliste auf einmal (weitere per Knopf) */
 #define PREVIEW_TILES_BATCH 30  /* Kacheln je Abschnitt auf einmal (weitere per Knopf) */
 #define PREVIEW_FILM_MIN_MINUTES 40
 #define COVER_WIDTH 224
@@ -99,6 +100,7 @@ typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 typedef struct {
     MdTitle *title;
     char *path;                 /* vorhandene Datei */
+    char *key;                  /* md_title_key, erst bei Bedarf */
     MdStatus status;
     bool selected;
 } Item;
@@ -220,12 +222,16 @@ typedef struct {
     MdImdbInfo info;
 } RatingJob;
 
-/* Zeile der Warteschlange */
+/* Zeile der Warteschlange; merkt sich, was sie zeigt, damit der Timer nur Änderungen anfasst */
 typedef struct {
     guint id;
     GtkWidget *row, *title, *subtitle, *bar, *pause, *retry, *remove, *open;
     char *target;
     bool seen;
+    int order;                  /* Platz in der Liste */
+    bool shown, paused;         /* shown: Stand unten gilt */
+    MdJobState state;
+    char *status;
 } JobRow;
 
 typedef struct {
@@ -290,10 +296,12 @@ typedef struct {
     guint hover_timer;
 
     /* Downloads */
-    GtkWidget *downloads_page, *hero, *hero_sub, *jobs_list, *jobs_empty;
+    GtkWidget *downloads_page, *hero, *hero_sub, *jobs_list, *jobs_empty, *jobs_more;
+    GtkWidget *clear_failed;
+    int jobs_limit;             /* so viele Zeilen zeigt die Liste */
     GtkWidget *limit_switch, *limit_spin;
     GHashTable *job_rows;       /* id -> JobRow* */
-    char *fingerprint;          /* erkennt Änderungen, die den Stand der Titel berühren */
+    GHashTable *job_marks;      /* Nummer -> JobMark: Stand beim letzten Timer-Schlag */
 
     /* Bibliothek */
     GtkWidget *library_hero, *library_sub, *library_list, *library_search;
@@ -366,7 +374,9 @@ static GtkWidget *set_wrapping(GtkWidget *widget, int max_chars)
 static void set_label_text(GtkWidget *widget, const char *text)
 {
     char *valid = g_utf8_make_valid(text ? text : "", -1);
-    gtk_label_set_text(GTK_LABEL(widget), valid);
+    /* gleicher Text: nicht setzen, sonst rechnet GTK das ganze Fenster neu aus */
+    if (g_strcmp0(gtk_label_get_label(GTK_LABEL(widget)), valid))
+        gtk_label_set_text(GTK_LABEL(widget), valid);
     g_free(valid);
 }
 
@@ -407,7 +417,8 @@ static void open_folder_of(const char *path)
 static void list_separator_header(GtkListBoxRow *this_row, GtkListBoxRow *before, gpointer data)
 {
     (void)data;
-    if (before && !gtk_list_box_row_get_header(this_row))
+    if (!before) gtk_list_box_row_set_header(this_row, NULL);   /* nach Umsortieren */
+    else if (!gtk_list_box_row_get_header(this_row))
         gtk_list_box_row_set_header(this_row, gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 }
 
@@ -831,6 +842,7 @@ static void item_free(gpointer data)
     Item *item = data;
     md_title_free(item->title);
     g_free(item->path);
+    g_free(item->key);
     g_free(item);
 }
 
@@ -1009,6 +1021,7 @@ static void add_items(GPtrArray *items, GPtrArray *titles, const char *dir)
     for (guint i = 0; i < titles->len; i++) {
         Item *item = g_new0(Item, 1);
         item->title = titles->pdata[i];
+        item->key = md_title_key(item->title);
         item->status = md_title_status(item->title, dir, &item->path);
         g_ptr_array_add(items, item);
     }
@@ -1357,8 +1370,10 @@ static void rebuild_results(void)
     if (ui.detail_tree.list) rebuild_tree(&ui.detail_tree);
 }
 
-/* Stand aller Treffer neu bestimmen, z. B. nach einem fertigen Download */
-static bool refresh_groups(GPtrArray *groups)
+/* Stand der Treffer neu bestimmen, z. B. nach einem fertigen Download. keys: nur Titel mit
+ * diesen Schlüsseln, NULL = alle. Die Vorschau hat Zehntausende Titel, und jede Prüfung schaut
+ * auf die Platte. */
+static bool refresh_groups(GPtrArray *groups, GHashTable *keys)
 {
     bool changed = false;
     for (guint g = 0; groups && g < groups->len; g++) {
@@ -1367,6 +1382,10 @@ static bool refresh_groups(GPtrArray *groups)
             Season *season = group->seasons->pdata[s];
             for (guint i = 0; i < season->items->len; i++) {
                 Item *item = season->items->pdata[i];
+                if (keys) {
+                    if (!item->key) item->key = md_title_key(item->title);
+                    if (!g_hash_table_contains(keys, item->key)) continue;
+                }
                 char *path = NULL;
                 MdStatus status = md_title_status(item->title, ui.cfg.dir, &path);
                 changed |= status != item->status || g_strcmp0(path, item->path);
@@ -1415,10 +1434,10 @@ static void update_series_news(void)
     md_history_snapshot_free(entries, count);
 }
 
-static void refresh_statuses(void)
+static void refresh_statuses(GHashTable *keys)
 {
-    bool changed = refresh_groups(ui.preview);
-    changed |= refresh_groups(ui.news_tree.groups);
+    bool changed = refresh_groups(ui.preview, keys);
+    changed |= refresh_groups(ui.news_tree.groups, keys);
     update_series_news();
     if (changed) rebuild_results();
     else update_tiles();
@@ -1596,15 +1615,18 @@ static void on_download_clicked(GtkButton *b, gpointer d)
                             .keep_original = ui.cfg.keep_original,
                             .skip_audio = (const char *const *)skip_audio,
                             .skip_subtitles = (const char *const *)skip_subtitles};
+    GHashTable *keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     for (guint i = 0; i < selected->len; i++) {
         Item *item = selected->pdata[i];
         md_queue_add(item->title, &options);
         item->selected = false;
+        g_hash_table_add(keys, md_title_key(item->title));
     }
     g_strfreev(skip_audio);
     g_strfreev(skip_subtitles);
     g_ptr_array_free(selected, TRUE);
-    refresh_statuses();
+    refresh_statuses(keys);
+    g_hash_table_destroy(keys);
     update_checks();
     gtk_stack_set_visible_child(GTK_STACK(ui.stack), ui.downloads_page);
 }
@@ -2992,6 +3014,7 @@ static void job_row_free(gpointer data)
 {
     JobRow *row = data;
     g_free(row->target);
+    g_free(row->status);
     g_free(row);
 }
 
@@ -3025,13 +3048,15 @@ static void on_job_open_clicked(GtkButton *b, gpointer d)
     open_folder_of(((JobRow *)d)->target);
 }
 
-/* Zeile der Warteschlange anlegen */
-static JobRow *new_job_row(const MdJobView *j)
+/* Zeile der Warteschlange an Platz order anlegen */
+static JobRow *new_job_row(const MdJobView *j, int order)
 {
     JobRow *row = g_new0(JobRow, 1);
     row->id = j->id;
     row->target = g_strdup(j->target);
+    row->order = order;
     row->row = gtk_list_box_row_new();
+    g_object_set_data(G_OBJECT(row->row), "job", row);
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row->row), FALSE);
     GtkWidget *v = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_margin_top(v, 10);
@@ -3114,18 +3139,28 @@ static char *job_status_text(const MdJobView *j)
     return text;
 }
 
-/* Zeile auf den aktuellen Stand bringen */
+/* Zeile auf den aktuellen Stand bringen; Unverändertes bleibt unangetastet */
 static void job_row_update(JobRow *row, const MdJobView *j)
 {
+    char *status = job_status_text(j);
+    bool changed = !row->shown || row->state != j->state || row->paused != j->paused;
+    if (!changed && !g_strcmp0(status, row->status)) {
+        g_free(status);
+        return;
+    }
+    set_label_text(row->subtitle, status);
+    g_free(row->status);
+    row->status = status;
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(row->bar), CLAMP(j->progress, 0, 1));
+    if (!changed) return;
+    row->shown = true;
+    row->state = j->state;
+    row->paused = j->paused;
+
     bool done = j->state == MD_JOB_DONE, failed = j->state == MD_JOB_FAILED;
     bool open = !done && !failed;
-    char *status = job_status_text(j);
-    set_label_text(row->subtitle, status);
-    g_free(status);
     g_object_set_data(G_OBJECT(row->row), "open", GINT_TO_POINTER(open));
-
     gtk_widget_set_visible(row->bar, open);
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(row->bar), CLAMP(j->progress, 0, 1));
     gtk_widget_set_visible(row->pause, open);
     gtk_widget_set_visible(row->retry, failed);
     gtk_widget_set_visible(row->open, done);
@@ -3177,9 +3212,13 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
     if (failed) g_string_append_printf(sub, " · %d fehlgeschlagen", failed);
     set_label_text(ui.hero_sub, sub->str);
     g_string_free(sub, TRUE);
+    gtk_widget_set_sensitive(ui.clear_failed, failed > 0);
 
-    char *page = open ? g_strdup_printf("Downloads (%d)", open) : g_strdup("Downloads");
-    gtk_container_child_set(GTK_CONTAINER(ui.stack), ui.downloads_page, "title", page, NULL);
+    char *page = open ? g_strdup_printf("Downloads (%d)", open) : g_strdup("Downloads"), *old;
+    gtk_container_child_get(GTK_CONTAINER(ui.stack), ui.downloads_page, "title", &old, NULL);
+    if (g_strcmp0(old, page))
+        gtk_container_child_set(GTK_CONTAINER(ui.stack), ui.downloads_page, "title", page, NULL);
+    g_free(old);
     g_free(page);
 
     /* Standby sperren, solange gearbeitet wird */
@@ -3207,36 +3246,123 @@ static gboolean job_row_stale(gpointer key, gpointer value, gpointer data)
     return TRUE;
 }
 
-/* Timer: Warteschlange anzeigen; bei fertigen oder neuen Aufträgen auch den Stand der Titel */
+/* Reihenfolge der Liste: was läuft, dann Fehler, dann Wartendes, Fertiges zuletzt */
+static int job_rank(const MdJobView *j)
+{
+    switch (j->state) {
+    case MD_JOB_DOWNLOADING:
+    case MD_JOB_CONVERTING: return 0;
+    case MD_JOB_FAILED: return 1;
+    case MD_JOB_DONE: return 3;
+    default: return 2;
+    }
+}
+
+typedef struct {
+    int rank, index;
+} JobSlot;
+
+static int job_slot_compare(const void *a, const void *b)
+{
+    const JobSlot *x = a, *y = b;
+    return x->rank != y->rank ? x->rank - y->rank : x->index - y->index;
+}
+
+static int job_row_compare(GtkListBoxRow *a, GtkListBoxRow *b, gpointer d)
+{
+    (void)d;
+    const JobRow *x = g_object_get_data(G_OBJECT(a), "job");
+    const JobRow *y = g_object_get_data(G_OBJECT(b), "job");
+    return x->order - y->order;
+}
+
+/* Stand eines Auftrags beim letzten Timer-Schlag */
+typedef struct {
+    int state;                  /* offen = 0, sonst MD_JOB_DONE oder MD_JOB_FAILED */
+    char *key;
+} JobMark;
+
+static void job_mark_free(gpointer data)
+{
+    JobMark *mark = data;
+    g_free(mark->key);
+    g_free(mark);
+}
+
+/* Schlüssel der Aufträge, die seit dem letzten Mal dazukamen, fertig wurden, fehlschlugen oder
+ * verschwanden; nur deren Titel müssen neu geprüft werden */
+static GHashTable *changed_job_keys(const MdJobView *jobs, int count)
+{
+    GHashTable *marks = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, job_mark_free);
+    GHashTable *keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (int i = 0; i < count; i++) {
+        gpointer id = GUINT_TO_POINTER(jobs[i].id);
+        JobMark *mark = g_new(JobMark, 1);
+        mark->state = jobs[i].state >= MD_JOB_DONE ? (int)jobs[i].state : 0;
+        mark->key = g_strdup(jobs[i].key);
+        const JobMark *old = g_hash_table_lookup(ui.job_marks, id);
+        if (!old || old->state != mark->state) g_hash_table_add(keys, g_strdup(mark->key));
+        g_hash_table_remove(ui.job_marks, id);
+        g_hash_table_insert(marks, id, mark);
+    }
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, ui.job_marks);
+    while (g_hash_table_iter_next(&iter, NULL, &value))
+        g_hash_table_add(keys, g_strdup(((JobMark *)value)->key));
+    g_hash_table_destroy(ui.job_marks);
+    ui.job_marks = marks;
+    return keys;
+}
+
+/* Timer: Warteschlange anzeigen; bei fertigen oder neuen Aufträgen auch den Stand der Titel.
+ * Die Liste zeigt nur die ersten jobs_limit Aufträge: Tausende Zeilen machen GTK zäh. */
 static gboolean on_tick(gpointer d)
 {
     (void)d;
     int count = 0;
     MdJobView *jobs = md_queue_snapshot(&count);
-    GString *mark = g_string_new(NULL);
-    for (int i = 0; i < count; i++) {
-        const MdJobView *j = &jobs[i];
+    JobSlot *slots = g_new(JobSlot, MAX(count, 1));
+    for (int i = 0; i < count; i++) slots[i] = (JobSlot){job_rank(&jobs[i]), i};
+    qsort(slots, count, sizeof *slots, job_slot_compare);
+    int shown = MIN(count, ui.jobs_limit);
+    bool moved = false;
+    for (int n = 0; n < shown; n++) {
+        const MdJobView *j = &jobs[slots[n].index];
         JobRow *row = g_hash_table_lookup(ui.job_rows, GUINT_TO_POINTER(j->id));
         if (!row) {
-            row = new_job_row(j);
+            row = new_job_row(j, n);
             g_hash_table_insert(ui.job_rows, GUINT_TO_POINTER(j->id), row);
         }
+        moved |= row->order != n;
+        row->order = n;
         row->seen = true;
         job_row_update(row, j);
-        g_string_append_printf(mark, "%u:%d,", j->id, j->state >= MD_JOB_DONE ? j->state : 0);
     }
+    g_free(slots);
     g_hash_table_foreach_remove(ui.job_rows, job_row_stale, NULL);
+    if (moved) gtk_list_box_invalidate_sort(GTK_LIST_BOX(ui.jobs_list));
     gtk_widget_set_visible(ui.jobs_empty, count == 0);
+    gtk_widget_set_visible(ui.jobs_more, count > shown);
+    if (count > shown) {
+        char *more = g_strdup_printf("Weitere anzeigen (noch %d)", count - shown);
+        if (g_strcmp0(gtk_button_get_label(GTK_BUTTON(ui.jobs_more)), more))
+            gtk_button_set_label(GTK_BUTTON(ui.jobs_more), more);
+        g_free(more);
+    }
+
     update_downloads_hero(jobs, count);
+    bool first = !ui.job_marks;
+    if (first)
+        ui.job_marks = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, job_mark_free);
+    GHashTable *keys = changed_job_keys(jobs, count);
     md_queue_snapshot_free(jobs, count);
-    if (g_strcmp0(mark->str, ui.fingerprint)) {
-        g_free(ui.fingerprint);
-        ui.fingerprint = g_strdup(mark->str);
-        refresh_statuses();
+    if (first || g_hash_table_size(keys)) {
+        refresh_statuses(first ? NULL : keys);
         rebuild_library();
         rebuild_videos(false);
     }
-    g_string_free(mark, TRUE);
+    g_hash_table_destroy(keys);
     update_genres();
     return G_SOURCE_CONTINUE;
 }
@@ -3261,6 +3387,22 @@ static void on_clear_done_clicked(GtkButton *b, gpointer d)
     (void)b;
     (void)d;
     md_queue_remove_finished();
+}
+
+static void on_clear_failed_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    (void)d;
+    md_queue_remove_failed();
+    on_tick(NULL);
+}
+
+static void on_jobs_more_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    (void)d;
+    ui.jobs_limit += JOB_ROWS_BATCH;
+    on_tick(NULL);
 }
 
 static void on_limit_changed(GtkWidget *w, gpointer d)
@@ -3288,12 +3430,16 @@ static GtkWidget *build_downloads_page(void)
     GtkWidget *pause = gtk_button_new_with_label("Alle pausieren");
     GtkWidget *resume = gtk_button_new_with_label("Alle fortsetzen");
     GtkWidget *clear = gtk_button_new_with_label("Fertige entfernen");
+    ui.clear_failed = gtk_button_new_with_label("Fehlgeschlagene entfernen");
+    gtk_widget_set_tooltip_text(ui.clear_failed, "Löscht auch die halbfertigen Dateien");
     g_signal_connect(pause, "clicked", G_CALLBACK(on_pause_all_clicked), NULL);
     g_signal_connect(resume, "clicked", G_CALLBACK(on_resume_all_clicked), NULL);
     g_signal_connect(clear, "clicked", G_CALLBACK(on_clear_done_clicked), NULL);
+    g_signal_connect(ui.clear_failed, "clicked", G_CALLBACK(on_clear_failed_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(buttons), pause, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(buttons), resume, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(buttons), clear, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(buttons), ui.clear_failed, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), buttons, FALSE, FALSE, 0);
 
     GtkWidget *limit = add_group(page, "Tempo");
@@ -3313,6 +3459,13 @@ static GtkWidget *build_downloads_page(void)
     g_signal_connect(ui.limit_spin, "value-changed", G_CALLBACK(on_limit_changed), NULL);
 
     ui.jobs_list = add_group(page, "Aufträge");
+    gtk_list_box_set_sort_func(GTK_LIST_BOX(ui.jobs_list), job_row_compare, NULL, NULL);
+    ui.jobs_limit = JOB_ROWS_BATCH;
+    ui.jobs_more = gtk_button_new_with_label("Weitere anzeigen");
+    gtk_widget_set_halign(ui.jobs_more, GTK_ALIGN_CENTER);
+    gtk_widget_set_no_show_all(ui.jobs_more, TRUE);
+    g_signal_connect(ui.jobs_more, "clicked", G_CALLBACK(on_jobs_more_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(page), ui.jobs_more, FALSE, FALSE, 6);
     ui.jobs_empty = new_label("Noch nichts in der Warteschlange. In der Vorschau auswählen "
                               "und „Herunterladen“ klicken.", "dim-label");
     gtk_widget_set_no_show_all(ui.jobs_empty, TRUE);
@@ -3331,7 +3484,7 @@ static void on_forget_clicked(GtkButton *b, gpointer d)
 {
     (void)d;
     md_history_forget(g_object_get_data(G_OBJECT(b), "path"));
-    refresh_statuses();
+    refresh_statuses(NULL);
     rebuild_library();
     rebuild_videos(false);
 }
@@ -5292,7 +5445,7 @@ static void on_choose_dir_clicked(GtkButton *b, gpointer d)
     ui.cfg.dir = path;
     update_dir_label();
     settings_save();
-    refresh_statuses();
+    refresh_statuses(NULL);
     update_selection();
 }
 

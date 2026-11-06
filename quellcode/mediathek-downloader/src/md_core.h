@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.0.1"
+#define MD_VERSION "2.1.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -96,6 +96,7 @@ typedef struct {
     bool paused;
     bool merging;               /* CONVERTING: nur Spuren zusammenführen, kein AV1 */
     char *title, *target, *message;
+    char *key;                  /* wie md_title_key */
     gint64 have, total;         /* Bytes */
     double speed;               /* Download: Bytes/s */
     double progress;            /* 0..1 der aktuellen Phase */
@@ -153,6 +154,7 @@ const char *md_source_label(int source);    /* "ZDF", "ARD" … */
 const char *md_title_url(const MdTitle *title, MdQuality quality);
 gint64 md_title_estimate(const MdTitle *title, MdQuality quality);  /* Bytes, geschätzt */
 char *md_target_path(const MdTitle *title, const char *dir);        /* Pfad der MP4-Datei */
+char *md_title_key(const MdTitle *title);   /* Schlüssel in Warteschlange und Verlauf */
 
 /* Titelbild der Seite website als Datei holen (blockiert); NULL = keines. Freigeben mit g_free. */
 char *md_cover_file(const char *website, const char *video);
@@ -181,6 +183,7 @@ void md_queue_set_paused(bool paused);  /* alle offenen Aufträge */
 void md_job_retry(guint id);
 void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dateien */
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
+void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
 void md_set_rate_limit(gint64 bytes_per_second);    /* 0 = unbegrenzt, gilt sofort */
 void md_set_parallel(int downloads, int conversions);
 /* Encoder für alle offenen Aufträge; eine laufende Umwandlung bleibt, wie sie ist */

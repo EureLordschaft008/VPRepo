@@ -243,6 +243,8 @@ static struct {
     int max_downloads, max_conversions;
     int workers;
     bool persist, quitting;
+    bool save_due;                  /* Warteschlange geändert, der Verteiler schreibt sie */
+    GHashTable *open_keys;          /* Schlüssel offener Aufträge, NULL = neu bestimmen */
     GThread *dispatcher;
     GHashTable *history;            /* Schlüssel -> History* */
 } q;
@@ -1985,6 +1987,11 @@ static char *title_key(const MdTitle *t)
     return key;
 }
 
+char *md_title_key(const MdTitle *t)
+{
+    return title_key(t);
+}
+
 /* ---------------------------------------------------------------------------
  * Verlauf
  *
@@ -2420,12 +2427,19 @@ void md_folder_check_apply(const MdFolderCheck *check, bool relink, bool add, bo
 MdStatus md_title_status(const MdTitle *t, const char *dir, char **path)
 {
     char *target = md_target_path(t, dir), *key = title_key(t), *known = NULL;
-    bool queued = false, recorded = false;
+    bool recorded = false;
     g_mutex_lock(&q.lock);
-    for (guint i = 0; i < q.jobs->len && !queued; i++) {
-        const Job *j = q.jobs->pdata[i];
-        queued = !strcmp(j->key, key) && j->state != MD_JOB_DONE && j->state != MD_JOB_FAILED;
+    /* Die Vorschau fragt Tausende Titel ab: offene Aufträge einmal verzeichnen statt jedes Mal
+     * die ganze Warteschlange zu durchsuchen */
+    if (!q.open_keys) {
+        q.open_keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        for (guint i = 0; i < q.jobs->len; i++) {
+            const Job *j = q.jobs->pdata[i];
+            if (j->state != MD_JOB_DONE && j->state != MD_JOB_FAILED)
+                g_hash_table_add(q.open_keys, g_strdup(j->key));
+        }
     }
+    bool queued = g_hash_table_contains(q.open_keys, key);
     const History *h = g_hash_table_lookup(q.history, key);
     if (h) {
         known = g_strdup(h->e.path);
@@ -3157,10 +3171,9 @@ static char *queue_path(void)
     return g_build_filename(g_app_dir, "warteschlange.tsv", NULL);
 }
 
-/* Warteschlange sichern (q.lock gehalten) */
-static void queue_save(void)
+/* Warteschlange als Text (q.lock gehalten) */
+static GString *queue_text(void)
 {
-    if (!q.persist) return;
     GString *out = g_string_new(QUEUE_HEADER "\n");
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *j = q.jobs->pdata[i];
@@ -3191,10 +3204,25 @@ static void queue_save(void)
         g_free(target);
         g_free(message);
     }
+    return out;
+}
+
+/* Text schreiben (ohne q.lock: bei Tausenden Aufträgen dauert das, samt fsync) */
+static void queue_write(GString *text)
+{
     char *path = queue_path();
-    g_file_set_contents(path, out->str, out->len, NULL);
+    g_file_set_contents(path, text->str, text->len, NULL);
     g_free(path);
-    g_string_free(out, TRUE);
+    g_string_free(text, TRUE);
+}
+
+/* Warteschlange sichern lassen (q.lock gehalten). Der Verteiler schreibt sie, so blockiert
+ * weder die Oberfläche noch ein Worker, und viele Änderungen hintereinander ergeben eine Datei. */
+static void queue_save(void)
+{
+    if (!q.persist) return;
+    q.save_due = true;
+    g_cond_signal(&q.wake);
 }
 
 static void job_free(Job *j)
@@ -3310,10 +3338,18 @@ static void remove_partial_files(const Job *j)
     g_free(tmp);
 }
 
+/* Zustand setzen (q.lock gehalten); das Verzeichnis offener Aufträge gilt danach nicht mehr */
+static void job_set_state(Job *j, MdJobState state)
+{
+    j->state = state;
+    g_clear_pointer(&q.open_keys, g_hash_table_destroy);
+}
+
 /* Auftrag aus der Liste nehmen und freigeben (q.lock gehalten, kein Worker aktiv) */
 static void job_discard(Job *j)
 {
     g_ptr_array_remove(q.jobs, j);
+    g_clear_pointer(&q.open_keys, g_hash_table_destroy);
     job_free(j);
 }
 
@@ -3337,7 +3373,7 @@ static void worker_finish(Job *j)
 static void job_fail(Job *j, const char *message)
 {
     md_log("FEHLER %s: %s", j->title, message);
-    j->state = MD_JOB_FAILED;
+    job_set_state(j, MD_JOB_FAILED);
     g_free(j->message);
     j->message = g_strdup(message);
 }
@@ -3992,7 +4028,7 @@ static gpointer download_thread(gpointer data)
     } else if (complete) {
         j->have = j->total;
         j->progress = 0;
-        j->state = processing && !already_there ? MD_JOB_CONVERT_WAITING : MD_JOB_DONE;
+        job_set_state(j, processing && !already_there ? MD_JOB_CONVERT_WAITING : MD_JOB_DONE);
         if (already_there) {
             g_free(j->message);
             j->message = g_strdup("War schon vorhanden");
@@ -4003,7 +4039,7 @@ static gpointer download_thread(gpointer data)
         }
         md_log("Download fertig: %s", j->title);
     } else {
-        j->state = MD_JOB_WAITING;                  /* pausiert, abgebrochen oder Programmende */
+        job_set_state(j, MD_JOB_WAITING);       /* pausiert, abgebrochen oder Programmende */
     }
     worker_finish(j);
     g_mutex_unlock(&q.lock);
@@ -4349,14 +4385,14 @@ static gpointer convert_thread(gpointer data)
     if (error) {
         job_fail(j, error);
     } else if (done) {
-        j->state = MD_JOB_DONE;
+        job_set_state(j, MD_JOB_DONE);
         j->progress = 1;
         g_free(j->message);
         j->message = g_strdup(note);
         history_add(j);
         md_log("Verarbeitung fertig: %s (%s)", j->title, note);
     } else if (interrupted) {
-        j->state = MD_JOB_CONVERT_WAITING;
+        job_set_state(j, MD_JOB_CONVERT_WAITING);
         j->progress = 0;
         if (q.quitting) j->paused = true;
     }
@@ -4391,11 +4427,11 @@ static gpointer dispatcher_thread(gpointer data)
             if (j->paused || j->worker) continue;
             GThreadFunc worker = NULL;
             if (j->state == MD_JOB_WAITING && downloads < q.max_downloads) {
-                j->state = MD_JOB_DOWNLOADING;
+                job_set_state(j, MD_JOB_DOWNLOADING);
                 downloads++;
                 worker = download_thread;
             } else if (j->state == MD_JOB_CONVERT_WAITING && conversions < q.max_conversions) {
-                j->state = MD_JOB_CONVERTING;
+                job_set_state(j, MD_JOB_CONVERTING);
                 conversions++;
                 worker = convert_thread;
             }
@@ -4406,6 +4442,14 @@ static gpointer dispatcher_thread(gpointer data)
             g_thread_unref(g_thread_new("auftrag", worker, j));
         }
         if (started) queue_save();
+        if (q.save_due) {
+            q.save_due = false;
+            GString *text = queue_text();
+            g_mutex_unlock(&q.lock);
+            queue_write(text);
+            g_mutex_lock(&q.lock);
+            continue;
+        }
         g_cond_wait_until(&q.wake, &q.lock, g_get_monotonic_time() + G_TIME_SPAN_SECOND);
     }
     g_mutex_unlock(&q.lock);
@@ -4451,9 +4495,14 @@ void md_shutdown(void)
     }
     g_cond_broadcast(&q.wake);
     while (q.workers > 0) g_cond_wait(&q.worker_done, &q.lock);
-    queue_save();
     g_mutex_unlock(&q.lock);
     g_thread_join(q.dispatcher);
+    if (q.persist) {
+        g_mutex_lock(&q.lock);
+        GString *text = queue_text();
+        g_mutex_unlock(&q.lock);
+        queue_write(text);
+    }
 }
 
 bool md_have_tools(char **missing)
@@ -4744,7 +4793,7 @@ guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
     j->quality = o->quality;
     j->gpu_quality = o->gpu_quality;
     j->cpu_rf = o->cpu_rf;
-    j->state = MD_JOB_WAITING;
+    job_set_state(j, MD_JOB_WAITING);
     j->remaining = -1;
     g_ptr_array_add(q.jobs, j);
     guint id = j->id;
@@ -4761,8 +4810,8 @@ MdJobView *md_queue_snapshot(int *count)
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *j = q.jobs->pdata[i];
         views[i] = (MdJobView){j->id, j->state, j->paused, j->merging, g_strdup(j->title),
-                               g_strdup(j->target), g_strdup(j->message), j->have, j->total,
-                               j->speed, j->progress, j->remaining};
+                               g_strdup(j->target), g_strdup(j->message), g_strdup(j->key),
+                               j->have, j->total, j->speed, j->progress, j->remaining};
     }
     *count = (int)q.jobs->len;
     g_mutex_unlock(&q.lock);
@@ -4775,6 +4824,7 @@ void md_queue_snapshot_free(MdJobView *views, int count)
         g_free(views[i].title);
         g_free(views[i].target);
         g_free(views[i].message);
+        g_free(views[i].key);
     }
     g_free(views);
 }
@@ -4811,7 +4861,7 @@ void md_job_retry(guint id)
     g_mutex_lock(&q.lock);
     Job *j = job_by_id(id);
     if (j && j->state == MD_JOB_FAILED) {
-        j->state = MD_JOB_WAITING;  /* fertige Dateien überspringt der Download von selbst */
+        job_set_state(j, MD_JOB_WAITING);  /* fertige Dateien überspringt der Download von selbst */
         j->paused = false;
         g_clear_pointer(&j->message, g_free);
         queue_save();
@@ -4843,6 +4893,21 @@ void md_queue_remove_finished(void)
         if (j->state == MD_JOB_DONE && !j->worker) job_discard(j);
     }
     queue_save();
+    g_mutex_unlock(&q.lock);
+}
+
+void md_queue_remove_failed(void)
+{
+    bool removed = false;
+    g_mutex_lock(&q.lock);
+    for (guint i = q.jobs->len; i-- > 0;) {
+        Job *j = q.jobs->pdata[i];
+        if (j->state != MD_JOB_FAILED || j->worker) continue;
+        remove_partial_files(j);
+        job_discard(j);
+        removed = true;
+    }
+    if (removed) queue_save();
     g_mutex_unlock(&q.lock);
 }
 
