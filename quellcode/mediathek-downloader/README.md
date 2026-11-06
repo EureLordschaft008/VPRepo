@@ -88,7 +88,9 @@ das Update unter Linux auch über `sudo apt upgrade`.
   und die seit dem letzten Download neue Folgen bekommen haben, auch wenn sie nicht in der Vorschau
   stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In Vorschau und Bibliothek markiert
   ein kleines grünes „!“ dieselben Serien. Während der Suche zeigt die Seite, welche Serie gerade
-  dran ist und wie weit es ist; ein Spinner in der Titelleiste zeigt es auf allen Seiten.
+  dran ist und wie weit es ist; ein Spinner in der Titelleiste zeigt es auf allen Seiten. Mit
+  „Neue Folgen automatisch laden“ (Einstellungen) kommen sie von selbst in die Warteschlange, mit
+  allen Sprachen und Untertiteln; gesucht wird beim Start und danach alle sechs Stunden.
 - **Meine Videos** – alles Geladene als Kacheln wie in einer Mediathek: oben „Weiterschauen“ und
   „Zuletzt geladen“ zum seitlichen Blättern, darunter Serien und Filme von A bis Z. Eine Serie
   öffnet sich mit ihren Staffeln und Folgen; der große Knopf spielt die angefangene oder die nächste
@@ -106,11 +108,15 @@ das Update unter Linux auch über `sudo apt upgrade`.
   der Festplatte, wie viel davon schon gesehen ist, und die größten Dateien. Sehzeit zählt nur im
   eingebauten Player und nur, was wirklich lief; sie liegt in `~/.mediathek-downloader/sehzeit.tsv`
   und bleibt, auch wenn die Datei gelöscht wird.
-- **Player** – spielt die Dateien im eigenen Fenster, auch AV1. Er merkt sich, wo eine Datei
-  aufgehört hat, macht dort weiter und startet am Ende die nächste Folge. Ton und Untertitel sind
-  wählbar. Tasten: Leertaste Pause, ←/→ 10 Sekunden (ohne die Leiste einzublenden), ↑/↓ Lautstärke,
-  M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück. Ab 95 % gilt eine Datei als
-  gesehen. Der Stand liegt in `~/.mediathek-downloader/wiedergabe.tsv`.
+- **Player** – spielt die Dateien im Hauptfenster, auch AV1; im Vollbild verschwindet die
+  Titelleiste. Er merkt sich, wo eine Datei aufgehört hat, macht dort weiter und startet am Ende die
+  nächste Folge. Tonspur und Untertitel lassen sich während der Wiedergabe wechseln bzw. an- und
+  ausschalten. Der Zoom blendet schwarze Balken aus: „Schwarze Balken ausblenden“ sucht per ffmpeg
+  nach Balken, die fest im Bild sind, und füllt das Fenster mit dem Inhalt. Tasten: Leertaste
+  Pause, ←/→ 10 Sekunden, ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
+  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück. Springen,
+  Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
+  Ab 95 % gilt eine Datei als gesehen. Der Stand liegt in `~/.mediathek-downloader/wiedergabe.tsv`.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.
@@ -119,17 +125,25 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
   dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei.
 - **Pause** – einzeln oder alle. Auch nach dem Beenden oder einem Absturz geht es an derselben
-  Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick.
+  Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick. Downloads und
+  Umwandlung lassen sich außerdem getrennt anhalten (Seite Downloads, „Steuerung“): Dann laden etwa
+  die Downloads weiter, während die Umwandlung stillsteht.
 - **Downloadliste** – oben steht, was gerade läuft, dann Fehlgeschlagenes, Wartendes und zuletzt
   Fertiges. Die Liste zeigt 100 Aufträge, „Weitere anzeigen“ holt die nächsten; so bleibt sie auch
   mit Tausenden Einträgen flüssig. „Fertige entfernen“ räumt Erledigtes weg, „Fehlgeschlagene
   entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
-  des AV1-Converters. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
+  des AV1-Converters. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
+  schneidet es dabei ab; ffmpeg prüft dafür fünf Stellen im Video, und im Zweifel bleibt das Bild
+  ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
+- **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
+  `~/.config/autostart`, Windows: Registry unter „Run“).
 - **Speicherort** – frei wählbar, Standard ist `~/Videos/Mediathek` (Windows: `Videos\Mediathek`).
 - **Zwischenspeicher** – Titelbilder, Kategorien, FSK und IMDb-Zuordnung bleiben dauerhaft liegen
-  und werden nicht neu geladen. Die Film- und Folgenlisten der Vorschau gelten sechs Stunden; der
+  und werden nicht neu geladen; verkleinerte Titelbilder hält das Programm zusätzlich im Speicher,
+  und hat ein Titel kein Bild, fragt es erst nach sieben Tagen wieder nach. Die Film- und
+  Folgenlisten der Vorschau gelten sechs Stunden; der
   Knopf „Vorschau neu laden“ holt sie sofort frisch. Der Ordner ist frei wählbar, Standard ist
   `~/.mediathek-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
 

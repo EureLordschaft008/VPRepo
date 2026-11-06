@@ -53,6 +53,7 @@
 #ifdef G_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <io.h>
+#include <wchar.h>
 #include <windows.h>
 #define localtime_r(t, tm) localtime_s(tm, t)
 #else
@@ -79,6 +80,7 @@
 #define COVER_URL_PREFIX "https://www.zdf.de/assets/"
 #define COVER_EPG_PREFIX "https://epg-image.zdf.de/"
 #define PAGE_RECHECK_SECONDS (7 * 24 * 3600)    /* Seite ohne Bild/Kategorie neu prüfen */
+#define NO_COVER_RETRY_SECONDS (24 * 3600)      /* Titelbild ohne Antwort der Seite neu suchen */
 #define COVER_SIZE "384x216"
 #define COVER_WIDTH_TEXT "384"
 #define COVER_ARTE_PREFIX "https://api-cdn.arte.tv/img/v2/image/"
@@ -121,6 +123,9 @@ static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define ENCODER_NICE 5
 #define SVT_PRESET "6"
 #define GOP_FRAMES "500"            /* Keyframe alle 10 s bei 50 Bildern/s */
+#define CROP_SAMPLES 5              /* Stellen im Video für die Suche nach Balken */
+#define CROP_FRAMES "25"            /* Bilder je Stelle */
+#define CROP_MIN_PIXELS 8           /* schmalere Ränder bleiben */
 #define QUEUE_HEADER "#mediathek-downloader-warteschlange 1"
 #define QUEUE_HEADER_OLD "#zdf-downloader-warteschlange 1"
 #define OLD_APP_DIR ".zdf-downloader"
@@ -244,6 +249,7 @@ static struct {
     int workers;
     bool persist, quitting;
     bool save_due;                  /* Warteschlange geändert, der Verteiler schreibt sie */
+    bool downloads_held, conversions_held;  /* alle Downloads bzw. Umwandlungen angehalten */
     GHashTable *open_keys;          /* Schlüssel offener Aufträge, NULL = neu bestimmen */
     GThread *dispatcher;
     GHashTable *history;            /* Schlüssel -> History* */
@@ -2846,11 +2852,29 @@ static void cover_from_video(const char *video, const char *path)
     g_free(tmp);
 }
 
+/* Merker "kein Bild": Ohne ihn fragte jeder Aufbau einer Übersicht erneut im Netz nach, für
+ * Titel ohne Bild per ffmpeg mit bis zu 20 s Wartezeit, und hielt die Bild-Threads auf. */
+static bool no_cover_marked(const char *marker)
+{
+    GStatBuf st;
+    if (g_stat(marker, &st) != 0) return false;
+    /* leerer Merker: Seite ohne Bild; sonst kam keine Antwort, das kann am Netz gelegen haben */
+    return time(NULL) - st.st_mtime < (st.st_size ? NO_COVER_RETRY_SECONDS
+                                                  : PAGE_RECHECK_SECONDS);
+}
+
 char *md_cover_file(const char *website, const char *video)
 {
-    char *info = page_info(website);
     char *path = cache_file(website, ".jpg");
-    if (file_size(path) <= 0 && info && *info != '\n') {
+    if (file_size(path) > 0) return path;
+    char *marker = cache_file(website, ".keinbild");
+    if (no_cover_marked(marker)) {
+        g_free(marker);
+        g_free(path);
+        return NULL;
+    }
+    char *info = page_info(website);
+    if (info && *info != '\n') {
         *strchr(info, '\n') = 0;
         char *tmp = g_strconcat(path, ".part", NULL), *messages = NULL;
         char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "20", "-A", USER_AGENT, "-o", tmp,
@@ -2859,9 +2883,13 @@ char *md_cover_file(const char *website, const char *video)
         g_free(messages);
         g_free(tmp);
     }
-    g_free(info);
     if (file_size(path) <= 0 && video && *video) cover_from_video(video, path);
-    if (file_size(path) > 0) return path;
+    bool found = file_size(path) > 0;
+    if (found) g_unlink(marker);
+    else g_file_set_contents(marker, info ? "" : "?", -1, NULL);
+    g_free(info);
+    g_free(marker);
+    if (found) return path;
     g_free(path);
     return NULL;
 }
@@ -3378,10 +3406,12 @@ static void job_fail(Job *j, const char *message)
     j->message = g_strdup(message);
 }
 
-/* soll der Worker aufhören? (q.lock gehalten) */
+/* soll der Worker aufhören? (q.lock gehalten). Angehaltene Downloads enden wie pausierte und
+ * laden später an derselben Stelle weiter. */
 static bool job_interrupted(const Job *j)
 {
-    return j->paused || j->remove_requested || q.quitting;
+    return j->paused || j->remove_requested || q.quitting ||
+           (q.downloads_held && j->state == MD_JOB_DOWNLOADING);
 }
 
 /* ---------------------------------------------------------------------------
@@ -4081,8 +4111,10 @@ bool md_gpu_available(void)
 }
 
 /* Bild per Grafikkarte nach AV1, Qualität als konstanter Quantisierer */
-static void add_gpu_encoder(GPtrArray *a, const char *encoder, const char *quality)
+static void add_gpu_encoder(GPtrArray *a, const char *encoder, const char *quality,
+                            const char *crop)
 {
+    if (crop) args_add(a, (const char *const[]){"-vf", crop, NULL});
     args_add(a, (const char *const[]){"-pix_fmt", "p010le", "-c:v", encoder, NULL});
     if (!strcmp(encoder, "av1_nvenc"))
         args_add(a, (const char *const[]){"-rc", "constqp", "-qp", quality, NULL});
@@ -4116,12 +4148,15 @@ bool md_gpu_available(void)
 }
 
 /* Bild per VAAPI nach AV1 */
-static void add_gpu_encoder(GPtrArray *a, const char *device, const char *quality)
+static void add_gpu_encoder(GPtrArray *a, const char *device, const char *quality,
+                            const char *crop)
 {
     (void)device;
-    args_add(a, (const char *const[]){"-vf", "format=p010,hwupload", "-c:v", "av1_vaapi",
+    char *filter = g_strdup_printf("%s%sformat=p010,hwupload", crop ? crop : "", crop ? "," : "");
+    args_add(a, (const char *const[]){"-vf", filter, "-c:v", "av1_vaapi",
                                       "-rc_mode", "CQP", "-global_quality:v", quality,
                                       "-g:v", GOP_FRAMES, NULL});
+    g_free(filter);
 }
 #endif
 
@@ -4145,6 +4180,78 @@ static bool media_info(const char *path, char **codec, double *duration)
     return ok && *codec && *duration > 0;
 }
 
+/* Breite und Höhe des Bildes -> false bei Fehler */
+static bool video_size(const char *path, int *width, int *height)
+{
+    char *argv[] = {"ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                    "stream=width,height", "-of", "csv=p=0:s=x", (char *)path, NULL};
+    char *out = NULL;
+    bool ok = run_capture(argv, &out, NULL) == 0 && out &&
+              sscanf(out, "%dx%d", width, height) == 2 && *width > 0 && *height > 0;
+    g_free(out);
+    return ok;
+}
+
+/* Fest ins Bild kodierte schwarze Balken finden: cropdetect an CROP_SAMPLES Stellen, der
+ * Bereich mit Inhalt ist die Vereinigung aller Stellen. Eine dunkle Szene lässt sich so nicht
+ * für einen Balken halten. -> false, wenn es nichts abzuschneiden gibt. */
+static bool detect_bars(const char *path, double duration, MdCrop *crop)
+{
+    int width = 0, height = 0;
+    if (duration < 60 || !video_size(path, &width, &height)) return false;
+    int x1 = width, x2 = -1, y1 = height, y2 = -1, valid = 0;
+    for (int i = 0; i < CROP_SAMPLES; i++) {
+        char at[32];
+        g_ascii_formatd(at, sizeof at, "%.1f", duration * (i + 1) / (CROP_SAMPLES + 1));
+        char *argv[] = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info", "-ss", at,
+                        "-i", (char *)path, "-map", "0:v:0", "-vf",
+                        "cropdetect=limit=24:round=2:reset=0", "-frames:v", CROP_FRAMES, "-an",
+                        "-sn", "-f", "null", "-", NULL};
+        char *err = NULL;
+        if (run_capture(argv, NULL, &err) == 0 && err) {
+            /* mit reset=0 steht der Bereich aller Bilder in der letzten Zeile */
+            const char *last = g_strrstr(err, "x1:");
+            int a1, a2, b1, b2;
+            if (last && sscanf(last, "x1:%d x2:%d y1:%d y2:%d", &a1, &a2, &b1, &b2) == 4 &&
+                a2 > a1 && b2 > b1) {
+                x1 = MIN(x1, a1);
+                x2 = MAX(x2, a2);
+                y1 = MIN(y1, b1);
+                y2 = MAX(y2, b2);
+                valid++;
+            }
+        }
+        g_free(err);
+    }
+    if (valid < CROP_SAMPLES / 2 + 1) return false;
+    /* gerade Werte, im Zweifel etwas mehr Bild */
+    x1 = MAX(x1, 0) & ~1;
+    y1 = MAX(y1, 0) & ~1;
+    int w = MIN((x2 - x1 + 2) & ~1, width - x1), h = MIN((y2 - y1 + 2) & ~1, height - y1);
+    bool worth = width - w >= CROP_MIN_PIXELS || height - h >= CROP_MIN_PIXELS;
+    if (!worth || w < width / 2 || h < height / 2) return false;
+    *crop = (MdCrop){.x = x1, .y = y1, .width = w, .height = h, .frame_width = width,
+                     .frame_height = height};
+    return true;
+}
+
+bool md_detect_bars(const char *path, MdCrop *crop)
+{
+    char *codec = NULL;
+    double duration = 0;
+    bool ok = media_info(path, &codec, &duration) && detect_bars(path, duration, crop);
+    g_free(codec);
+    return ok;
+}
+
+/* Filter gegen die Balken für ffmpeg, NULL = keine */
+static char *crop_filter(const char *path, double duration)
+{
+    MdCrop c;
+    if (!detect_bars(path, duration, &c)) return NULL;
+    return g_strdup_printf("crop=%d:%d:%d:%d", c.width, c.height, c.x, c.y);
+}
+
 /* Name und Sprache der Ausgabespur setzen; kind = 'a' oder 's' */
 static void add_track_metadata(GPtrArray *argv, char kind, int index, const char *label,
                                const char *lang)
@@ -4158,9 +4265,10 @@ static void add_track_metadata(GPtrArray *argv, char kind, int index, const char
 }
 
 /* ffmpeg-Befehl bauen: Bild aus der Hauptdatei, dazu alle vorhandenen Spuren.
- * copy = Bild unverändert übernehmen, sonst AV1 mit dem gewählten Encoder. */
+ * copy = Bild unverändert übernehmen, sonst AV1 mit dem gewählten Encoder; crop = Filter gegen
+ * schwarze Balken oder NULL. */
 static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, const char *device,
-                                   const char *tmp)
+                                   const char *crop, const char *tmp)
 {
     GPtrArray *a = g_ptr_array_new_with_free_func(g_free);
     args_add(a, (const char *const[]){"ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel",
@@ -4200,12 +4308,15 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
         args_add(a, (const char *const[]){"-c:v", "copy", NULL});
     } else if (encoder == MD_ENCODER_GPU) {
         snprintf(quality, sizeof quality, "%d", j->gpu_quality);
-        add_gpu_encoder(a, device, quality);
+        add_gpu_encoder(a, device, quality, crop);
     } else {
         snprintf(quality, sizeof quality, "%d", j->cpu_rf);
-        args_add(a, (const char *const[]){"-vf", "format=yuv420p10le", "-c:v", "libsvtav1",
+        char *filter = g_strdup_printf("%s%sformat=yuv420p10le", crop ? crop : "",
+                                       crop ? "," : "");
+        args_add(a, (const char *const[]){"-vf", filter, "-c:v", "libsvtav1",
                                           "-preset", SVT_PRESET, "-crf", quality, "-svtav1-params",
                                           "tune=1", "-g:v", GOP_FRAMES, NULL});
+        g_free(filter);
     }
     args_add(a, (const char *const[]){"-c:a", "copy", "-c:s", "srt", NULL});
     for (guint i = 0; i < metadata->len; i++) arg_add(a, metadata->pdata[i]);
@@ -4219,15 +4330,15 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
 
 /* ffmpeg ausführen -> 0 = fertig, -1 = unterbrochen, sonst Fehler (die letzten
  * ffmpeg-Meldungen landen in *messages) */
-static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, double duration,
-                       char **messages)
+static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *crop, const char *tmp,
+                       double duration, char **messages)
 {
     const char *device = render_device();
     if (!copy && encoder == MD_ENCODER_GPU && !device) {
         *messages = g_strdup("Keine Grafikkarte mit AV1-Encoder gefunden.");
         return 1;
     }
-    GPtrArray *command = build_ffmpeg_cmd(j, copy, encoder, device, tmp);
+    GPtrArray *command = build_ffmpeg_cmd(j, copy, encoder, device, copy ? NULL : crop, tmp);
     char **argv = (char **)command->pdata;
 
     GPid pid = 0;
@@ -4255,7 +4366,7 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *tmp, do
         if (errors->len > 2000) g_string_erase(errors, 0, errors->len - 2000);
 
         g_mutex_lock(&q.lock);
-        bool end = j->remove_requested || q.quitting, pause = j->paused;
+        bool end = j->remove_requested || q.quitting, pause = j->paused || q.conversions_held;
         j->progress = duration > 0 ? MIN(seconds / duration, 1.0) : 0;
         j->remaining = factor > 0 ? (duration - seconds) / factor : -1;
         g_mutex_unlock(&q.lock);
@@ -4315,23 +4426,25 @@ static gpointer convert_thread(gpointer data)
 {
     Job *j = data;
     char *tmp = temp_path(j->target), *result = result_path(j->target);
-    char *error = NULL, *note = NULL, *codec = NULL, *messages = NULL;
+    char *error = NULL, *note = NULL, *codec = NULL, *messages = NULL, *crop = NULL;
     double duration = 0;
     bool done = false, interrupted = false, copy = !j->convert, av1_useless = false;
 
     if (!media_info(j->target, &codec, &duration))
         error = g_strdup("Die heruntergeladene Datei ist nicht lesbar.");
+    else if (!copy && (crop = crop_filter(j->target, duration)))
+        md_log("Schwarze Balken werden abgeschnitten (%s): %s", crop, j->title);
     while (!error && !done && !interrupted) {
         g_mutex_lock(&q.lock);
         j->merging = copy;
         j->progress = 0;
         g_mutex_unlock(&q.lock);
         g_clear_pointer(&messages, g_free);
-        int rc = run_encoder(j, copy, j->encoder, tmp, duration, &messages);
+        int rc = run_encoder(j, copy, j->encoder, crop, tmp, duration, &messages);
         if (rc > 0 && !copy && j->encoder == MD_ENCODER_GPU) {
             md_log("GPU-Umwandlung fehlgeschlagen, versuche CPU: %s (%s)", j->title, messages);
             g_clear_pointer(&messages, g_free);
-            rc = run_encoder(j, false, MD_ENCODER_CPU, tmp, duration, &messages);
+            rc = run_encoder(j, false, MD_ENCODER_CPU, crop, tmp, duration, &messages);
         }
         if (rc < 0) {
             interrupted = true;
@@ -4367,7 +4480,8 @@ static gpointer convert_thread(gpointer data)
                                        av1_useless ? " · AV1 wäre nicht kleiner" : "");
             } else {
                 char *before = md_format_size(comparable_size(j, duration));
-                note = g_strdup_printf("AV1: %s statt %s%s", after, before, tracks);
+                note = g_strdup_printf("AV1: %s statt %s%s%s", after, before,
+                                       crop ? " · Balken abgeschnitten" : "", tracks);
                 g_free(before);
             }
             g_free(tracks);
@@ -4404,6 +4518,7 @@ static gpointer convert_thread(gpointer data)
     g_free(note);
     g_free(codec);
     g_free(messages);
+    g_free(crop);
     return NULL;
 }
 
@@ -4426,11 +4541,12 @@ static gpointer dispatcher_thread(gpointer data)
             Job *j = q.jobs->pdata[i];
             if (j->paused || j->worker) continue;
             GThreadFunc worker = NULL;
-            if (j->state == MD_JOB_WAITING && downloads < q.max_downloads) {
+            if (j->state == MD_JOB_WAITING && downloads < q.max_downloads && !q.downloads_held) {
                 job_set_state(j, MD_JOB_DOWNLOADING);
                 downloads++;
                 worker = download_thread;
-            } else if (j->state == MD_JOB_CONVERT_WAITING && conversions < q.max_conversions) {
+            } else if (j->state == MD_JOB_CONVERT_WAITING && conversions < q.max_conversions &&
+                       !q.conversions_held) {
                 job_set_state(j, MD_JOB_CONVERTING);
                 conversions++;
                 worker = convert_thread;
@@ -4729,6 +4845,97 @@ bool md_launch_detached(char **argv, char **error)
 #endif
 }
 
+/* ---------------------------------------------------------------------------
+ * Autostart
+ * Mit --autostart startet das Programm minimiert. Ob es eingetragen ist, steht nur im System,
+ * nicht in den Einstellungen; so gilt auch, was der Nutzer dort selbst ändert.
+ * ------------------------------------------------------------------------- */
+#ifdef G_OS_WIN32
+#define RUN_KEY L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+#define RUN_VALUE L"Mediathek Downloader"
+
+bool md_autostart_enabled(void)
+{
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+    bool found = RegQueryValueExW(key, RUN_VALUE, NULL, NULL, NULL, NULL) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    return found;
+}
+
+bool md_autostart_set(bool enabled, char **error)
+{
+    HKEY key;
+    LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key,
+                              NULL);
+    if (rc == ERROR_SUCCESS) {
+        if (enabled) {
+            wchar_t exe[MAX_PATH], line[MAX_PATH + 32];
+            DWORD length = GetModuleFileNameW(NULL, exe, MAX_PATH);
+            if (length == 0 || length >= MAX_PATH) rc = ERROR_FILENAME_EXCED_RANGE;
+            else {
+                _snwprintf(line, G_N_ELEMENTS(line), L"\"%ls\" --autostart", exe);
+                line[G_N_ELEMENTS(line) - 1] = 0;
+                rc = RegSetValueExW(key, RUN_VALUE, 0, REG_SZ, (const BYTE *)line,
+                                    (DWORD)((wcslen(line) + 1) * sizeof(wchar_t)));
+            }
+        } else {
+            rc = RegDeleteValueW(key, RUN_VALUE);
+            if (rc == ERROR_FILE_NOT_FOUND) rc = ERROR_SUCCESS;
+        }
+        RegCloseKey(key);
+    }
+    if (rc != ERROR_SUCCESS && error) {
+        char *message = g_win32_error_message((int)rc);
+        *error = g_strdup_printf("Autostart lässt sich nicht ändern: %s", message);
+        g_free(message);
+    }
+    return rc == ERROR_SUCCESS;
+}
+#else
+static char *autostart_path(void)
+{
+    return g_build_filename(g_get_user_config_dir(), "autostart", "mediathek-downloader.desktop",
+                            NULL);
+}
+
+bool md_autostart_enabled(void)
+{
+    char *path = autostart_path();
+    bool found = g_file_test(path, G_FILE_TEST_IS_REGULAR);
+    g_free(path);
+    return found;
+}
+
+bool md_autostart_set(bool enabled, char **error)
+{
+    static const char ENTRY[] = "[Desktop Entry]\n"
+                                "Type=Application\n"
+                                "Name=Mediathek Downloader\n"
+                                "Exec=mediathek-downloader --autostart\n"
+                                "Icon=mediathek-downloader\n"
+                                "Terminal=false\n"
+                                "X-GNOME-Autostart-enabled=true\n";
+    char *path = autostart_path(), *dir = g_path_get_dirname(path);
+    GError *err = NULL;
+    bool ok;
+    if (enabled) {
+        ok = g_mkdir_with_parents(dir, 0755) == 0 &&
+             g_file_set_contents(path, ENTRY, -1, &err);
+    } else {
+        ok = g_unlink(path) == 0 || errno == ENOENT;
+    }
+    if (!ok && error)
+        *error = g_strdup_printf("Autostart lässt sich nicht ändern: %s",
+                                 err ? err->message : g_strerror(errno));
+    g_clear_error(&err);
+    g_free(path);
+    g_free(dir);
+    return ok;
+}
+#endif
+
 /* Steht label in der NULL-terminierten Liste? */
 static bool label_listed(const char *const *list, const char *label)
 {
@@ -4851,8 +5058,26 @@ void md_queue_set_paused(bool paused)
 {
     g_mutex_lock(&q.lock);
     for (guint i = 0; i < q.jobs->len; i++) job_set_paused(q.jobs->pdata[i], paused);
+    if (!paused) q.downloads_held = q.conversions_held = false;
     queue_save();
     g_cond_signal(&q.wake);
+    g_mutex_unlock(&q.lock);
+}
+
+void md_queue_hold(bool downloads, bool conversions)
+{
+    g_mutex_lock(&q.lock);
+    q.downloads_held = downloads;
+    q.conversions_held = conversions;
+    g_cond_signal(&q.wake);
+    g_mutex_unlock(&q.lock);
+}
+
+void md_queue_holds(bool *downloads, bool *conversions)
+{
+    g_mutex_lock(&q.lock);
+    *downloads = q.downloads_held;
+    *conversions = q.conversions_held;
     g_mutex_unlock(&q.lock);
 }
 

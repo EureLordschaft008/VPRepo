@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.1.0"
+#define MD_VERSION "2.2.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -144,6 +144,16 @@ void md_log(const char *format, ...) G_GNUC_PRINTF(1, 2);
 bool md_have_tools(char **missing);     /* curl, ffmpeg, ffprobe vorhanden? */
 bool md_gpu_available(void);            /* AV1-Encoder per VAAPI nutzbar? (kurzer Test) */
 
+/* Bereich mit Inhalt, wenn schwarze Balken fest im Bild sind (Pixel des kodierten Bildes) */
+typedef struct {
+    int x, y, width, height, frame_width, frame_height;
+} MdCrop;
+bool md_detect_bars(const char *path, MdCrop *crop);   /* dauert einige Sekunden */
+
+/* Start mit der Anmeldung (Linux: ~/.config/autostart, Windows: Registry „Run“) */
+bool md_autostart_enabled(void);
+bool md_autostart_set(bool enabled, char **error);
+
 /* --- Suche -------------------------------------------------------------- */
 /* Liefert MdTitle* (mit md_title_free freigeben); NULL bei Fehler (*error gesetzt).
  * cancel: wird zwischen den Seiten geprüft, darf NULL sein. */
@@ -179,7 +189,11 @@ guint md_queue_add(const MdTitle *title, const MdJobOptions *options);
 MdJobView *md_queue_snapshot(int *count);
 void md_queue_snapshot_free(MdJobView *views, int count);
 void md_job_set_paused(guint id, bool paused);
-void md_queue_set_paused(bool paused);  /* alle offenen Aufträge */
+void md_queue_set_paused(bool paused);  /* alle offenen Aufträge; false hebt auch md_queue_hold auf */
+/* Alle Downloads bzw. alle Umwandlungen anhalten, unabhängig voneinander. Laufende Downloads
+ * enden und laden später weiter, laufende Umwandlungen stehen still. */
+void md_queue_hold(bool downloads, bool conversions);
+void md_queue_holds(bool *downloads, bool *conversions);
 void md_job_retry(guint id);
 void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dateien */
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */

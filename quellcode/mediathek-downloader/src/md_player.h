@@ -1,8 +1,9 @@
 /*
  * Mediathek Downloader – eingebauter Player (md_player.c)
  * =======================================================
- * Ein Fenster mit Bild, Zeitleiste, Ton- und Untertitelwahl auf Grundlage von GStreamer.
- * Es gibt höchstens ein Player-Fenster; ein weiterer Aufruf spielt dort die neue Datei.
+ * Eine Seite mit Bild, Zeitleiste, Ton- und Untertitelwahl auf Grundlage von GStreamer, im
+ * Stack des Hauptfensters. Es gibt höchstens einen Player; ein weiterer Aufruf spielt dort die
+ * neue Datei.
  * Alle Funktionen laufen im GTK-Hauptthread.
  */
 #ifndef MD_PLAYER_H
@@ -21,15 +22,18 @@ typedef char *(*MdPlayerNext)(const char *path, char **title, gpointer data);
 typedef struct {
     MdPlayerProgress progress;
     MdPlayerNext next;          /* darf NULL sein */
+    void (*closed)(gpointer data);  /* Player geht zu (Esc, Zurück); darf NULL sein */
     gpointer data;
 } MdPlayerHooks;
 
 /* Lässt sich abspielen? Sonst *why (g_free) mit dem fehlenden Teil */
 bool md_player_available(char **why);
-/* Datei im offenen Player-Fenster; NULL = keines offen */
+/* Datei im offenen Player; NULL = keiner offen */
 const char *md_player_current(void);
-/* path ab start Sekunden abspielen; false = Player nicht verfügbar */
-bool md_player_play(GtkWindow *parent, const char *path, const char *title, double start,
+/* path ab start Sekunden abspielen, als Seite "player" in stack; false = nicht verfügbar */
+bool md_player_play(GtkStack *stack, const char *path, const char *title, double start,
                     const MdPlayerHooks *hooks);
+/* Player schließen und die Seite entfernen; ruft vorher hooks.closed */
+void md_player_close(void);
 
 #endif

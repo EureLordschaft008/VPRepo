@@ -332,6 +332,63 @@ static void test_update_sums(void)
     g_free(sums);
 }
 
+/* Testvideo w×h mit Inhalt im Bereich cw×ch ab x,y, der Rest schwarz; false = ffmpeg fehlt */
+static bool make_video(const char *name, int w, int h, int cw, int ch, int x, int y)
+{
+    char *filter = g_strdup_printf("testsrc2=s=%dx%d:d=70:r=5,pad=%d:%d:%d:%d:black", cw, ch, w, h,
+                                   x, y);
+    char *argv[] = {"ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", filter, "-c:v",
+                    "libx264", "-preset", "ultrafast", (char *)name, NULL};
+    bool ok = run_capture(argv, NULL, NULL) == 0;
+    g_free(filter);
+    return ok;
+}
+
+/* Balken oben/unten und links/rechts werden gefunden, ein volles Bild bleibt ganz */
+static void test_crop_bars(void)
+{
+    char *ffmpeg = g_find_program_in_path("ffmpeg");
+    g_free(ffmpeg);
+    if (!ffmpeg || !make_video("letterbox.mp4", 640, 360, 640, 268, 0, 46) ||
+        !make_video("pillarbox.mp4", 640, 360, 480, 360, 80, 0) ||
+        !make_video("voll.mp4", 640, 360, 640, 360, 0, 0)) {
+        g_test_skip("ffmpeg fehlt");
+        return;
+    }
+    MdCrop c;
+    g_assert_true(md_detect_bars("letterbox.mp4", &c));
+    g_assert_cmpint(c.width, ==, 640);
+    g_assert_cmpint(c.height, ==, 268);
+    g_assert_cmpint(c.y, ==, 46);
+    g_assert_true(md_detect_bars("pillarbox.mp4", &c));
+    g_assert_cmpint(c.width, ==, 480);
+    g_assert_cmpint(c.x, ==, 80);
+    g_assert_cmpint(c.frame_width, ==, 640);
+    g_assert_false(md_detect_bars("voll.mp4", &c));
+    char *filter = crop_filter("pillarbox.mp4", 70);
+    g_assert_cmpstr(filter, ==, "crop=480:360:80:0");
+    g_free(filter);
+}
+
+#ifndef G_OS_WIN32
+/* Autostart-Eintrag landet in XDG_CONFIG_HOME (hier der Testordner) und geht wieder weg */
+static void test_autostart(void)
+{
+    g_assert_false(md_autostart_enabled());
+    g_assert_true(md_autostart_set(true, NULL));
+    g_assert_true(md_autostart_enabled());
+    char *path = autostart_path(), *text = NULL;
+    g_assert_true(g_str_has_prefix(path, test_dir));
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    g_assert_nonnull(strstr(text, "Exec=mediathek-downloader --autostart\n"));
+    g_assert_true(md_autostart_set(false, NULL));
+    g_assert_false(md_autostart_enabled());
+    g_assert_true(md_autostart_set(false, NULL));       /* schon weg: kein Fehler */
+    g_free(path);
+    g_free(text);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     test_dir_create();
@@ -347,6 +404,10 @@ int main(int argc, char **argv)
     g_test_add_func("/pfad/kurze-namen", test_path_short_names);
     g_test_add_func("/update/versionen", test_update_versions);
     g_test_add_func("/update/pruefsummen", test_update_sums);
+    g_test_add_func("/av1/schwarze-balken", test_crop_bars);
+#ifndef G_OS_WIN32
+    g_test_add_func("/autostart/eintrag", test_autostart);
+#endif
     GThread *server = server_start();
     int result = g_test_run();
     server_stop(server);

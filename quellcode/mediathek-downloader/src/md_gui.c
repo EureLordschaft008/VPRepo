@@ -52,7 +52,9 @@
 #define COVER_WIDTH 224
 #define COVER_HEIGHT 126
 #define COVER_THREADS 4
+#define COVER_CACHE_MAX 1000    /* Titelbilder im Speicher, je etwa 85 KB */
 #define UPDATE_DELAY_SECONDS 8  /* Update-Suche nach dem Start, wenn die Vorschau steht */
+#define NEWS_INTERVAL_SECONDS (6 * 3600)  /* neue Folgen erneut suchen, wenn sie von selbst laden */
 #define HOVER_DELAY_MS 500     /* so lange ruht die Maus auf der Kachel bis zum Popup */
 #define GENRE_TICKS 4           /* neue Kategorien alle so vielen Timer-Schläge zeigen */
 #define FOOTER_PREVIEW 0
@@ -195,6 +197,12 @@ typedef struct {
     MdPageInfo *info;
 } CoverJob;
 
+/* fertig verkleinertes Titelbild im Speicher */
+typedef struct {
+    GdkPixbuf *pixbuf;
+    char *path;
+} CachedCover;
+
 /* Bild einer Kachel in "Meine Videos" im Hintergrund */
 typedef struct {
     char *key, *video, *website;
@@ -245,6 +253,8 @@ typedef struct {
     bool maximized;
     bool update_check;          /* beim Start nach Updates suchen */
     char *update_skip;          /* diese Version nicht mehr anbieten */
+    bool auto_news;             /* neue Folgen geladener Serien von selbst laden */
+    bool hold_downloads, hold_conversions;  /* alle Downloads bzw. Umwandlungen angehalten */
 } Config;
 
 typedef struct {
@@ -267,6 +277,8 @@ typedef struct {
     GtkWidget *news_page, *news_note, *news_spinner;
     GtkWidget *news_busy_box, *news_busy_detail, *news_progress, *header_spinner;
     bool news_busy;
+    bool start_minimized;       /* --autostart */
+    GtkWidget *videos_page, *player_return;     /* Seite, zu der der Player zurückkehrt */
 
     /* Fußzeile und Mediatheken */
     GtkWidget *selection_labels[FOOTER_COUNT], *target_labels[FOOTER_COUNT];
@@ -286,6 +298,8 @@ typedef struct {
     GPtrArray *preview;         /* Group*, neueste zuerst */
     GHashTable *preview_index;  /* Group.key -> Group* */
     GThreadPool *cover_pool, *imdb_pool;
+    GHashTable *covers;         /* Seite -> CachedCover*, überlebt das Neuladen der Vorschau */
+    GQueue *cover_order;        /* Seiten in der Reihenfolge des Ladens, für COVER_CACHE_MAX */
     int film_limit, series_limit, series_loading;
     bool preview_busy, preview_refreshed;
     ResultTree detail_tree;     /* Liste der offenen Detailansicht */
@@ -298,6 +312,7 @@ typedef struct {
     /* Downloads */
     GtkWidget *downloads_page, *hero, *hero_sub, *jobs_list, *jobs_empty, *jobs_more;
     GtkWidget *clear_failed;
+    GtkWidget *hold_downloads, *hold_conversions;   /* Schalter: angehalten */
     int jobs_limit;             /* so viele Zeilen zeigt die Liste */
     GtkWidget *limit_switch, *limit_spin;
     GHashTable *job_rows;       /* id -> JobRow* */
@@ -789,6 +804,9 @@ static void settings_load(void)
     c->height = settings_int(file, "Hoehe", 800, 0, 10000);
     c->maximized = settings_bool(file, "Maximiert", false);
     c->update_check = settings_bool(file, "UpdateSuchen", true);
+    c->auto_news = settings_bool(file, "NeueFolgenLaden", false);
+    c->hold_downloads = settings_bool(file, "DownloadsAngehalten", false);
+    c->hold_conversions = settings_bool(file, "UmwandlungAngehalten", false);
     c->update_skip = g_key_file_get_string(file, SETTINGS_GROUP, "UpdateUebersprungen", NULL);
     g_key_file_free(file);
 }
@@ -817,6 +835,9 @@ static void settings_save(void)
     g_key_file_set_integer(file, SETTINGS_GROUP, "Hoehe", c->height);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "Maximiert", c->maximized);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UpdateSuchen", c->update_check);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "NeueFolgenLaden", c->auto_news);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "DownloadsAngehalten", c->hold_downloads);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "UmwandlungAngehalten", c->hold_conversions);
     if (c->update_skip)
         g_key_file_set_string(file, SETTINGS_GROUP, "UpdateUebersprungen", c->update_skip);
     char *path = settings_path();
@@ -832,6 +853,7 @@ static void apply_queue_settings(void)
     md_set_parallel(ui.cfg.parallel, ui.cfg.conversions);
     md_set_cover_dir(ui.cfg.cache_dir);
     md_set_encoder((MdEncoder)ui.cfg.encoder, ui.cfg.gpu_quality, ui.cfg.cpu_rf);
+    md_queue_hold(ui.cfg.hold_downloads, ui.cfg.hold_conversions);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1740,11 +1762,40 @@ static void merge_imdb_genres(Group *group)
     ui.genres_dirty = true;
 }
 
+static void cached_cover_free(gpointer data)
+{
+    CachedCover *cover = data;
+    g_object_unref(cover->pixbuf);
+    g_free(cover->path);
+    g_free(cover);
+}
+
+/* Titelbild merken; die ältesten fallen heraus */
+static void cache_cover(const char *website, GdkPixbuf *pixbuf, const char *path)
+{
+    if (!ui.covers) {
+        ui.covers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, cached_cover_free);
+        ui.cover_order = g_queue_new();
+    }
+    CachedCover *cover = g_new0(CachedCover, 1);
+    cover->pixbuf = g_object_ref(pixbuf);
+    cover->path = g_strdup(path);
+    if (!g_hash_table_contains(ui.covers, website))
+        g_queue_push_tail(ui.cover_order, g_strdup(website));
+    g_hash_table_replace(ui.covers, g_strdup(website), cover);
+    while (g_queue_get_length(ui.cover_order) > COVER_CACHE_MAX) {
+        char *old = g_queue_pop_head(ui.cover_order);
+        g_hash_table_remove(ui.covers, old);
+        g_free(old);
+    }
+}
+
 /* Bild im Hintergrund laden und verkleinern */
 static gboolean on_cover_done(gpointer data)
 {
     CoverJob *job = data;
     Group *group = ui.preview_index ? g_hash_table_lookup(ui.preview_index, job->key) : NULL;
+    if (job->pixbuf) cache_cover(job->website, job->pixbuf, job->path);
     if (group && job->pixbuf) {
         g_set_object(&group->cover, job->pixbuf);
         g_free(group->cover_path);
@@ -1811,6 +1862,14 @@ static void request_cover(Group *group)
 {
     if (group->cover_requested || !group->website) return;
     group->cover_requested = true;
+    CachedCover *cached = ui.covers ? g_hash_table_lookup(ui.covers, group->website) : NULL;
+    if (cached) {
+        g_set_object(&group->cover, cached->pixbuf);
+        g_free(group->cover_path);
+        group->cover_path = g_strdup(cached->path);
+        set_tile_cover(group);
+        return;
+    }
     CoverJob *job = g_new0(CoverJob, 1);
     job->key = g_strdup(group->key);
     job->website = g_strdup(group->website);
@@ -2800,6 +2859,42 @@ static bool title_is_news(const MdTitle *t, const char *topic, gint64 finished, 
     return same && md_title_status(t, dir, NULL) == MD_STATUS_MISSING;
 }
 
+/* Einstellung "Neue Folgen automatisch laden": alle gefundenen Folgen mit allen Spuren in die
+ * Warteschlange */
+static void queue_news(void)
+{
+    MdJobOptions options = {.dir = ui.cfg.dir, .quality = (MdQuality)ui.cfg.quality,
+                            .convert = ui.cfg.convert, .encoder = (MdEncoder)ui.cfg.encoder,
+                            .gpu_quality = ui.cfg.gpu_quality, .cpu_rf = ui.cfg.cpu_rf,
+                            .keep_original = ui.cfg.keep_original};
+    GHashTable *keys = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    int queued = 0;
+    for (guint g = 0; ui.news_tree.groups && g < ui.news_tree.groups->len; g++) {
+        const Group *group = ui.news_tree.groups->pdata[g];
+        for (guint s = 0; s < group->seasons->len; s++) {
+            const Season *season = group->seasons->pdata[s];
+            for (guint i = 0; i < season->items->len; i++) {
+                Item *item = season->items->pdata[i];
+                if (!item_open(item)) continue;
+                md_queue_add(item->title, &options);
+                item->selected = false;
+                g_hash_table_add(keys, md_title_key(item->title));
+                queued++;
+            }
+        }
+    }
+    if (queued) {
+        md_log("Neue Folgen automatisch eingereiht: %d", queued);
+        char *text = g_strdup_printf("%d neue %s automatisch in die Warteschlange gestellt.",
+                                     queued, plural(queued, "Folge", "Folgen"));
+        show_info_bar(GTK_MESSAGE_INFO, text);
+        g_free(text);
+        refresh_statuses(keys);
+        update_checks();
+    }
+    g_hash_table_destroy(keys);
+}
+
 static gboolean on_news_done(gpointer data)
 {
     NewsJob *job = data;
@@ -2823,6 +2918,7 @@ static gboolean on_news_done(gpointer data)
     ui.news_busy = false;
     show_news_busy(false);
     rebuild_tree(&ui.news_tree);
+    if (ui.cfg.auto_news) queue_news();
     g_ptr_array_free(job->items, TRUE);
     g_strfreev(job->topics);
     g_free(job->finished);
@@ -2932,6 +3028,14 @@ static void start_news_load(void)
     ui.news_tree.empty_text = "Wird geprüft …";
     show_news_busy(true);
     g_thread_unref(g_thread_new("neue-folgen", news_thread, job));
+}
+
+/* bei laufendem Programm (z. B. aus dem Autostart) regelmäßig nachsehen */
+static gboolean on_news_timer(gpointer d)
+{
+    (void)d;
+    if (ui.cfg.auto_news) start_news_load();
+    return G_SOURCE_CONTINUE;
 }
 
 static void on_news_refresh_clicked(GtkButton *b, gpointer d)
@@ -3175,8 +3279,30 @@ static void job_row_update(JobRow *row, const MdJobView *j)
 }
 
 /* Kopfzeile: was läuft gerade? */
+static void on_hold_changed(GObject *w, GParamSpec *spec, gpointer d);
+
+/* Schalter "Downloads/Umwandlung anhalten" zum Stand bringen ("Alle fortsetzen" hebt beides auf) */
+static void sync_hold_switches(bool downloads, bool conversions)
+{
+    ui.cfg.hold_downloads = downloads;
+    ui.cfg.hold_conversions = conversions;
+    GtkWidget *switches[] = {ui.hold_downloads, ui.hold_conversions};
+    bool states[] = {downloads, conversions};
+    for (int i = 0; i < 2; i++) {
+        g_signal_handlers_block_by_func(switches[i], on_hold_changed, NULL);
+        gtk_switch_set_active(GTK_SWITCH(switches[i]), states[i]);
+        g_signal_handlers_unblock_by_func(switches[i], on_hold_changed, NULL);
+    }
+}
+
 static void update_downloads_hero(const MdJobView *jobs, int count)
 {
+    bool hold_downloads = false, hold_conversions = false;
+    md_queue_holds(&hold_downloads, &hold_conversions);
+    if (hold_downloads != ui.cfg.hold_downloads || hold_conversions != ui.cfg.hold_conversions) {
+        sync_hold_switches(hold_downloads, hold_conversions);
+        settings_save();
+    }
     int active = 0, open = 0, paused = 0, failed = 0, done = 0;
     double speed = 0, remaining = 0;
     for (int i = 0; i < count; i++) {
@@ -3186,7 +3312,8 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
         if (j->state == MD_JOB_DONE || j->state == MD_JOB_FAILED) continue;
         open++;
         if (j->paused) paused++;
-        else if (j->state == MD_JOB_DOWNLOADING || j->state == MD_JOB_CONVERTING) active++;
+        else if (j->state == MD_JOB_DOWNLOADING ||
+                 (j->state == MD_JOB_CONVERTING && !hold_conversions)) active++;
         if (j->state == MD_JOB_DOWNLOADING) {
             speed += j->speed;
             remaining = MAX(remaining, j->remaining);
@@ -3210,6 +3337,8 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
     }
     g_string_append_printf(sub, "%d offen · %d fertig", open, done);
     if (failed) g_string_append_printf(sub, " · %d fehlgeschlagen", failed);
+    if (hold_downloads) g_string_append(sub, " · Downloads angehalten");
+    if (hold_conversions) g_string_append(sub, " · Umwandlung angehalten");
     set_label_text(ui.hero_sub, sub->str);
     g_string_free(sub, TRUE);
     gtk_widget_set_sensitive(ui.clear_failed, failed > 0);
@@ -3382,6 +3511,18 @@ static void on_resume_all_clicked(GtkButton *b, gpointer d)
     show_info_bar(GTK_MESSAGE_INFO, NULL);
 }
 
+static void on_hold_changed(GObject *w, GParamSpec *spec, gpointer d)
+{
+    (void)w;
+    (void)spec;
+    (void)d;
+    ui.cfg.hold_downloads = gtk_switch_get_active(GTK_SWITCH(ui.hold_downloads));
+    ui.cfg.hold_conversions = gtk_switch_get_active(GTK_SWITCH(ui.hold_conversions));
+    md_queue_hold(ui.cfg.hold_downloads, ui.cfg.hold_conversions);
+    settings_save();
+    on_tick(NULL);
+}
+
 static void on_clear_done_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
@@ -3442,7 +3583,18 @@ static GtkWidget *build_downloads_page(void)
     gtk_box_pack_end(GTK_BOX(buttons), ui.clear_failed, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), buttons, FALSE, FALSE, 0);
 
-    GtkWidget *limit = add_group(page, "Tempo");
+    GtkWidget *limit = add_group(page, "Steuerung");
+    ui.hold_downloads = gtk_switch_new();
+    ui.hold_conversions = gtk_switch_new();
+    sync_hold_switches(ui.cfg.hold_downloads, ui.cfg.hold_conversions);
+    g_signal_connect(ui.hold_downloads, "notify::active", G_CALLBACK(on_hold_changed), NULL);
+    g_signal_connect(ui.hold_conversions, "notify::active", G_CALLBACK(on_hold_changed), NULL);
+    add_row(limit, "Downloads anhalten",
+            "Umwandlungen laufen weiter. Ein Download setzt später an derselben Stelle fort.", NULL,
+            ui.hold_downloads, NULL);
+    add_row(limit, "Umwandlung anhalten",
+            "AV1 und das Zusammenführen der Spuren stehen still, Downloads laufen weiter.", NULL,
+            ui.hold_conversions, NULL);
     ui.limit_switch = gtk_switch_new();
     gtk_switch_set_active(GTK_SWITCH(ui.limit_switch), ui.cfg.limit_on);
     ui.limit_spin = new_spin(1, 1000, 1, ui.cfg.limit_mb);
@@ -3885,6 +4037,8 @@ static void request_frame(GtkWidget *image, const char *key, const char *video,
                           const char *website)
 {
     GdkPixbuf *pixbuf = g_hash_table_lookup(ui.frames, key);
+    CachedCover *cached = website && ui.covers ? g_hash_table_lookup(ui.covers, website) : NULL;
+    if (!pixbuf && cached) pixbuf = cached->pixbuf;     /* schon aus der Vorschau bekannt */
     if (pixbuf) {
         gtk_image_set_from_pixbuf(GTK_IMAGE(image), pixbuf);
         return;
@@ -3989,11 +4143,23 @@ static char *on_player_next(const char *path, char **title, gpointer data)
     return NULL;
 }
 
+/* Player zu: zurück zur Seite, von der aus er geöffnet wurde */
+static void on_player_closed(gpointer data)
+{
+    (void)data;
+    GtkWidget *back = ui.player_return ? ui.player_return : ui.videos_page;
+    if (!g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(ui.stack)), "player"))
+        gtk_stack_set_visible_child(GTK_STACK(ui.stack), back);
+}
+
 /* Datei im eingebauten Player; geht das nicht, im Standard-Programm */
 static void play_file(const char *path, const char *title, double start)
 {
-    MdPlayerHooks hooks = {on_player_progress, on_player_next, NULL};
-    if (md_player_play(GTK_WINDOW(ui.win), path, title, start, &hooks)) {
+    MdPlayerHooks hooks = {on_player_progress, on_player_next, on_player_closed, NULL};
+    GtkWidget *current = gtk_stack_get_visible_child(GTK_STACK(ui.stack));
+    if (g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(ui.stack)), "player"))
+        ui.player_return = current;
+    if (md_player_play(GTK_STACK(ui.stack), path, title, start, &hooks)) {
         bool film = false;
         char *name = stats_name(path, &film);
         md_stats_add(name, film, g_get_real_time() / G_USEC_PER_SEC, 0, 1, 0);
@@ -5167,8 +5333,10 @@ static void on_stack_page_changed(GObject *stack, GParamSpec *spec, gpointer d)
 {
     (void)spec;
     (void)d;
-    if (!g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(stack)), "statistik"))
-        rebuild_stats();
+    const char *name = gtk_stack_get_visible_child_name(GTK_STACK(stack));
+    if (!g_strcmp0(name, "statistik")) rebuild_stats();
+    /* anderer Reiter gewählt: der Player hat keinen eigenen und geht zu */
+    if (g_strcmp0(name, "player") && md_player_current()) md_player_close();
 }
 
 static GtkWidget *build_stats_page(void)
@@ -5465,7 +5633,7 @@ static void on_choose_cache_clicked(GtkButton *b, gpointer d)
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
 static GtkWidget *quality_combo, *encoder_combo, *gpu_spin, *cpu_spin, *parallel_spin;
 static GtkWidget *convert_spin, *av1_switch, *keep_switch, *signed_switch, *min_spin;
-static GtkWidget *update_switch;
+static GtkWidget *update_switch, *news_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
@@ -5484,11 +5652,31 @@ static void on_setting_changed(GtkWidget *w, gpointer d)
     c->keep_original = gtk_switch_get_active(GTK_SWITCH(keep_switch));
     c->show_signed = gtk_switch_get_active(GTK_SWITCH(signed_switch));
     c->update_check = gtk_switch_get_active(GTK_SWITCH(update_switch));
+    bool auto_news = c->auto_news;
+    c->auto_news = gtk_switch_get_active(GTK_SWITCH(news_switch));
+    if (c->auto_news && !auto_news) start_news_load();      /* gleich nachsehen */
     apply_queue_settings();
     settings_save();
     update_settings_rows();
     if (c->quality != old_quality) rebuild_results();   /* Größen der Treffer */
     update_selection();
+}
+
+/* Autostart steht im System, nicht in der Einstellungsdatei */
+static void on_autostart_changed(GObject *w, GParamSpec *spec, gpointer d)
+{
+    (void)spec;
+    (void)d;
+    bool enabled = gtk_switch_get_active(GTK_SWITCH(w));
+    if (enabled == md_autostart_enabled()) return;
+    char *error = NULL;
+    if (!md_autostart_set(enabled, &error)) {
+        show_info_bar(GTK_MESSAGE_WARNING, error);
+        g_free(error);
+        g_signal_handlers_block_by_func(w, on_autostart_changed, NULL);
+        gtk_switch_set_active(GTK_SWITCH(w), !enabled);
+        g_signal_handlers_unblock_by_func(w, on_autostart_changed, NULL);
+    }
 }
 
 /* Schalter anlegen und verdrahten */
@@ -5534,8 +5722,9 @@ static GtkWidget *build_settings_page(void)
     GtkWidget *av1 = add_group(page, "AV1");
     av1_switch = new_setting_switch(c->convert);
     add_row(av1, "Nach dem Download nach AV1 umwandeln",
-            "Spart meist die Hälfte des Platzes. Das Ergebnis wird geprüft; ist es nicht kleiner, "
-            "bleibt die MP4-Datei.", NULL, av1_switch, NULL);
+            "Spart meist die Hälfte des Platzes. Schwarze Balken im Bild werden abgeschnitten. Das "
+            "Ergebnis wird geprüft; ist es nicht kleiner, bleibt die MP4-Datei.", NULL, av1_switch,
+            NULL);
     encoder_combo = new_setting_combo(ENCODER_TEXT, 2, c->encoder);
     ui.encoder_row = add_row(av1, "Encoder", "GPU wird geprüft …", NULL, encoder_combo,
                              &ui.encoder_sub);
@@ -5564,6 +5753,19 @@ static GtkWidget *build_settings_page(void)
     add_row(search, "Fassungen mit Gebärdensprache anzeigen",
             "Die Einblendung ist fest im Bild, darum sind das eigene Einträge.", NULL,
             signed_switch, NULL);
+
+    GtkWidget *start = add_group(page, "Automatisch");
+    GtkWidget *autostart = gtk_switch_new();
+    gtk_switch_set_active(GTK_SWITCH(autostart), md_autostart_enabled());
+    g_signal_connect(autostart, "notify::active", G_CALLBACK(on_autostart_changed), NULL);
+    add_row(start, "Mit dem Computer starten",
+            "Startet nach der Anmeldung minimiert.", NULL,
+            autostart, NULL);
+    news_switch = new_setting_switch(c->auto_news);
+    add_row(start, "Neue Folgen automatisch laden",
+            "Neue Folgen von Serien, von denen schon etwas geladen ist, kommen von selbst in die "
+            "Warteschlange, mit allen Sprachen und Untertiteln. Gesucht wird beim Start und danach "
+            "alle sechs Stunden.", NULL, news_switch, NULL);
 
     GtkWidget *updates = add_group(page, "Updates");
     update_switch = new_setting_switch(c->update_check);
@@ -6094,7 +6296,8 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_preview_page(), "vorschau", "Vorschau");
     ui.news_page = build_news_page();
     gtk_stack_add_titled(GTK_STACK(ui.stack), ui.news_page, "neu", "Neue Folgen");
-    gtk_stack_add_titled(GTK_STACK(ui.stack), build_videos_page(), "videos", "Meine Videos");
+    ui.videos_page = build_videos_page();
+    gtk_stack_add_titled(GTK_STACK(ui.stack), ui.videos_page, "videos", "Meine Videos");
     ui.downloads_page = build_downloads_page();
     gtk_stack_add_titled(GTK_STACK(ui.stack), ui.downloads_page, "downloads", "Downloads");
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_library_page(), "bibliothek", "Bibliothek");
@@ -6115,6 +6318,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     g_signal_connect(ui.win, "window-state-event", G_CALLBACK(on_window_state), NULL);
     g_signal_connect(ui.win, "size-allocate", G_CALLBACK(on_window_size_allocate), NULL);
     g_signal_connect(ui.stack, "notify::visible-child", G_CALLBACK(on_stack_page_changed), NULL);
+    if (ui.start_minimized) gtk_window_iconify(GTK_WINDOW(ui.win));
     gtk_widget_show_all(ui.win);
     gtk_widget_hide(ui.infobar);
     gtk_widget_hide(ui.update_bar);
@@ -6141,7 +6345,17 @@ static void on_activate(GtkApplication *app, gpointer d)
     start_preview_load(MD_CACHE_USE);
     g_thread_unref(g_thread_new("gpu", gpu_check_thread, NULL));
     g_timeout_add_seconds(UPDATE_DELAY_SECONDS, on_update_timer, NULL);
+    g_timeout_add_seconds(NEWS_INTERVAL_SECONDS, on_news_timer, NULL);
     gtk_widget_grab_focus(ui.preview_search);
+}
+
+/* --autostart: minimiert starten */
+static gint on_local_options(GApplication *app, GVariantDict *options, gpointer d)
+{
+    (void)app;
+    (void)d;
+    ui.start_minimized = g_variant_dict_contains(options, "autostart");
+    return -1;                                      /* weiter wie üblich */
 }
 
 int main(int argc, char **argv)
@@ -6155,6 +6369,9 @@ int main(int argc, char **argv)
     ui.app = gtk_application_new(APP_ID, G_APPLICATION_DEFAULT_FLAGS);
     g_signal_connect(ui.app, "startup", G_CALLBACK(on_startup), NULL);
     g_signal_connect(ui.app, "activate", G_CALLBACK(on_activate), NULL);
+    g_application_add_main_option(G_APPLICATION(ui.app), "autostart", 0, G_OPTION_FLAG_NONE,
+                                  G_OPTION_ARG_NONE, "Minimiert starten (Autostart)", NULL);
+    g_signal_connect(ui.app, "handle-local-options", G_CALLBACK(on_local_options), NULL);
 #ifdef G_OS_UNIX
     g_unix_signal_add(SIGINT, on_quit_request, NULL);
     g_unix_signal_add(SIGTERM, on_quit_request, NULL);

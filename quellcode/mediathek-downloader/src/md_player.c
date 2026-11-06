@@ -1,16 +1,27 @@
 /*
  * Mediathek Downloader – eingebauter Player
  * =========================================
- * playbin von GStreamer spielt die Datei, gtksink liefert das Bild als GTK-Widget. Über dem Bild
+ * playbin von GStreamer spielt die Datei, gtksink liefert das Bild als GTK-Widget. Der Player ist
+ * eine Seite im Stack des Hauptfensters; im Vollbild verschwindet dessen Titelleiste. Über dem Bild
  * liegt eine Leiste mit Zeitleiste und Knöpfen; sie blendet sich bei laufendem Video nach kurzer
  * Zeit ohne Mausbewegung aus. Der Bus von GStreamer meldet sich über die GLib-Hauptschleife,
  * darum läuft alles im GTK-Hauptthread.
  *
  * Tasten: Leertaste/K Pause, ←/→ (J/L) 10 Sekunden, ↑/↓ Lautstärke, M stumm, F/F11 Vollbild,
- * N nächste Folge, Esc Vollbild verlassen oder Fenster schließen.
+ * N nächste Folge, A Tonspur, S Untertitel, Z schwarze Balken aus/ein, +/− Zoom, 0 ganzes Bild,
+ * Esc Vollbild verlassen oder Player schließen.
+ *
+ * Untertitel: playbin gibt sie an einen appsink statt sie ins Bild zu rechnen; ein Label über
+ * dem Bild zeigt sie. So lassen sie sich ohne Umbau der Pipeline umschalten, bleiben beim Zoom
+ * lesbar und brauchen kein Pango-Plugin von GStreamer.
+ *
+ * Zoom: Das Bild-Widget von gtksink passt das Video immer ganz in seine Fläche ein. Für den
+ * Zoom bekommt es darum eine größere Fläche als das Fenster; die Bildfläche (ZoomBox) hat ein
+ * eigenes GdkWindow und schneidet ab, was übersteht.
  */
 #include <gst/gst.h>
 #include <string.h>
+#include "md_core.h"
 #include "md_player.h"
 
 #define PLAYER_TICK_MS 250
@@ -18,35 +29,55 @@
 #define HIDE_MS 2500            /* Leiste ausblenden nach so langer Ruhe der Maus */
 #define SEEK_STEP 10.0
 #define VOLUME_STEP 0.05
-#define PLAY_FLAG_TEXT (1 << 2) /* GstPlayFlags von playbin: Untertitel zeigen */
+#define PLAY_FLAG_TEXT (1 << 2) /* GstPlayFlags von playbin: Untertitel-Spuren nutzen */
+#define SUBTITLE_MAX_SECONDS 10.0       /* Untertitel ohne Dauer so lange zeigen */
 #define RESUME_MIN 5.0          /* kürzere Stände gelten als Anfang */
-#define DEFAULT_WIDTH 1280
+#define SEEK_WAIT_MS 3000        /* länger dauert kein Sprung; sonst gilt wieder die echte Stelle */
+#define OSD_MS 1500             /* Hinweis oben links so lange zeigen */
+#define ZOOM_STEP 1.1
+#define ZOOM_MAX 4.0
 
 static const char *const PLAYER_CSS =
     ".zd-player { background-color: black; }\n"
     ".zd-player-bar { padding: 6px 10px; border-radius: 0; }\n"
     ".zd-player-bar button { min-height: 0; padding: 4px 8px; }\n"
     ".zd-player-title { font-weight: bold; }\n"
+    ".zd-player-osd { padding: 8px 14px; border-radius: 8px; font-weight: bold; }\n"
+    ".zd-player-subtitle { color: white; background-color: rgba(0, 0, 0, 0.65);"
+    " padding: 4px 12px; border-radius: 6px; }\n"
     ".zd-player-error { padding: 18px; border-radius: 10px; }\n";
 
 typedef struct {
-    GtkWidget *win, *video, *revealer, *scale, *time_label, *title_label;
+    GtkWidget *root, *toplevel, *video, *zoom_box, *revealer, *scale, *time_label, *title_label;
     GtkWidget *play, *next, *audio_button, *text_button, *fullscreen, *volume;
-    GtkWidget *error_box, *error_label;
-    GstElement *playbin;
+    GtkWidget *error_box, *error_label, *osd, *subtitle;
+    GstElement *playbin, *sink;
     char *path, *title, *next_path, *next_title;
     double start, duration;
+    double video_width, video_height;   /* Bildgröße samt Pixelseitenverhältnis, 0 = unbekannt */
     int want_audio, want_text;  /* gewählte Spuren, -1 = Vorgabe bzw. keine Untertitel */
-    bool prerolled, playing, ended, is_fullscreen, updating, stay_paused;
-    guint tick, hide_timer, inhibit;
+    int audio_count, text_count;
+    bool prerolled, playing, ended, is_fullscreen, updating, closing;
+    bool seeking;               /* Sprung bei laufendem Video: kurzes Anhalten nicht melden */
+    double seek_target;         /* >= 0: Sprung läuft, Zeitleiste zeigt schon das Ziel */
+    gint64 seek_started;
+    double subtitle_start, subtitle_end;    /* Stelle im Video, in der der Text gilt */
+    int subtitle_size;          /* Schriftgröße in Pixeln, folgt der Bildhöhe */
+    bool fill;                  /* Balken ausblenden: Inhalt füllt die Fläche */
+    double zoom;                /* sonst: Vergrößerung gegenüber dem eingepassten Bild */
+    bool bars_known, bars_found, bars_busy;
+    MdCrop bars;                /* Bereich mit Inhalt, wenn Balken fest im Bild sind */
+    guint tick, hide_timer, osd_timer, inhibit;
     gint64 last_report;
     MdPlayerHooks hooks;
 } Player;
 
-static Player *player;          /* NULL = kein Fenster offen */
+static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
 
 static void load_file(Player *p, const char *path, const char *title, double start);
+static void build_track_menu(Player *p, bool text);
+static void hide_subtitle(Player *p);
 
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
@@ -67,9 +98,15 @@ static double query_seconds(GstElement *e, bool duration)
     return ok && value > 0 ? (double)value / GST_SECOND : 0;
 }
 
+/* Während eines Sprungs meldet GStreamer noch die alte Stelle: dann gilt das Ziel, sonst
+ * springt die Zeitleiste hin und her, und ein zweites → zählte von der alten Stelle aus */
 static double current_position(const Player *p)
 {
-    return p->ended ? p->duration : query_seconds(p->playbin, false);
+    if (p->ended) return p->duration;
+    if (p->seek_target >= 0 &&
+        g_get_monotonic_time() - p->seek_started < SEEK_WAIT_MS * G_TIME_SPAN_MILLISECOND)
+        return p->seek_target;
+    return query_seconds(p->playbin, false);
 }
 
 /* Stand an die Oberfläche melden */
@@ -170,7 +207,7 @@ static void update_inhibit(Player *p)
 
 static void set_cursor_visible(Player *p, bool visible)
 {
-    GdkWindow *window = gtk_widget_get_window(p->win);
+    GdkWindow *window = gtk_widget_get_window(p->zoom_box);
     if (!window) return;
     GdkCursor *cursor = visible ? NULL
                         : gdk_cursor_new_from_name(gdk_window_get_display(window), "none");
@@ -209,6 +246,217 @@ static void show_error(Player *p, const char *text)
     set_cursor_visible(p, true);
 }
 
+static gboolean on_osd_timeout(gpointer data)
+{
+    Player *p = data;
+    p->osd_timer = 0;
+    gtk_widget_hide(p->osd);
+    return G_SOURCE_REMOVE;
+}
+
+/* kurzer Hinweis oben links, ohne die Leiste über das Bild zu legen */
+static void show_osd(Player *p, const char *text)
+{
+    gtk_label_set_text(GTK_LABEL(p->osd), text);
+    gtk_widget_show(p->osd);
+    if (p->osd_timer) g_source_remove(p->osd_timer);
+    p->osd_timer = g_timeout_add(OSD_MS, on_osd_timeout, p);
+}
+
+/* ---------------------------------------------------------------------------
+ * Zoom
+ * ------------------------------------------------------------------------- */
+/* Lage des ganzen Bildes in der Bildfläche width × height: eingepasst, gezoomt oder so groß,
+ * dass der Inhalt ohne Balken die Fläche füllt. Was übersteht, wird abgeschnitten. */
+static void video_rect(const Player *p, int width, int height, GdkRectangle *r)
+{
+    *r = (GdkRectangle){0, 0, width, height};
+    double vw = p->video_width, vh = p->video_height;
+    if (vw <= 0 || vh <= 0 || width <= 0 || height <= 0 || (!p->fill && p->zoom <= 1.0)) return;
+    double fit = MIN(width / vw, height / vh);
+    /* Inhalt in Bildkoordinaten; ohne erkannte Balken das ganze Bild */
+    double cx = 0, cy = 0, cw = vw, ch = vh;
+    if (p->fill && p->bars_found) {
+        double sx = vw / p->bars.frame_width, sy = vh / p->bars.frame_height;
+        cx = p->bars.x * sx;
+        cy = p->bars.y * sy;
+        cw = p->bars.width * sx;
+        ch = p->bars.height * sy;
+    }
+    double scale = p->fill ? MAX(width / cw, height / ch) : fit * p->zoom;
+    scale = CLAMP(scale, fit, fit * ZOOM_MAX);
+    double rw = vw * scale, rh = vh * scale;
+    double rx = width / 2.0 - (cx + cw / 2) * scale, ry = height / 2.0 - (cy + ch / 2) * scale;
+    /* kein leerer Rand, solange das Bild breiter bzw. höher ist als die Fläche */
+    rx = rw >= width ? CLAMP(rx, width - rw, 0) : (width - rw) / 2;
+    ry = rh >= height ? CLAMP(ry, height - rh, 0) : (height - rh) / 2;
+    /* abgerundete Lage, aufgerundete Größe: lieber ein Pixel zu viel Bild als ein Spalt */
+    int x = (int)rx - (rx < (int)rx), y = (int)ry - (ry < (int)ry);
+    *r = (GdkRectangle){x, y, (int)(rw + rx - x + 0.999), (int)(rh + ry - y + 0.999)};
+}
+
+typedef struct {
+    GtkEventBox parent;
+    Player *player;
+} ZoomBox;
+
+typedef struct {
+    GtkEventBoxClass parent_class;
+} ZoomBoxClass;
+
+G_DEFINE_TYPE(ZoomBox, zoom_box, GTK_TYPE_EVENT_BOX)
+
+static void zoom_box_size_allocate(GtkWidget *w, GtkAllocation *a)
+{
+    GTK_WIDGET_CLASS(zoom_box_parent_class)->size_allocate(w, a);
+    Player *p = ((ZoomBox *)w)->player;
+    GtkWidget *child = gtk_bin_get_child(GTK_BIN(w));
+    if (!p || !child || !gtk_widget_get_visible(child)) return;
+    GdkRectangle r;
+    video_rect(p, a->width, a->height, &r);
+    if (!gtk_widget_get_has_window(w)) {
+        r.x += a->x;
+        r.y += a->y;
+    }
+    gtk_widget_size_allocate(child, &r);
+}
+
+static void zoom_box_class_init(ZoomBoxClass *klass)
+{
+    GTK_WIDGET_CLASS(klass)->size_allocate = zoom_box_size_allocate;
+}
+
+static void zoom_box_init(ZoomBox *box)
+{
+    (void)box;
+}
+
+/* Bildgröße aus den Caps von gtksink */
+static void read_video_size(Player *p)
+{
+    GstPad *pad = gst_element_get_static_pad(p->sink, "sink");
+    GstCaps *caps = pad ? gst_pad_get_current_caps(pad) : NULL;
+    p->video_width = p->video_height = 0;
+    if (caps && gst_caps_get_size(caps) > 0) {
+        const GstStructure *st = gst_caps_get_structure(caps, 0);
+        int width = 0, height = 0, par_n = 1, par_d = 1;
+        gst_structure_get_int(st, "width", &width);
+        gst_structure_get_int(st, "height", &height);
+        if (!gst_structure_get_fraction(st, "pixel-aspect-ratio", &par_n, &par_d) || par_d <= 0)
+            par_n = par_d = 1;
+        p->video_width = (double)width * par_n / par_d;
+        p->video_height = height;
+    }
+    if (caps) gst_caps_unref(caps);
+    if (pad) gst_object_unref(pad);
+}
+
+static void apply_zoom(Player *p)
+{
+    gtk_widget_queue_resize(p->zoom_box);
+}
+
+typedef struct {
+    char *path;
+    MdCrop crop;
+    bool found;
+} BarsJob;
+
+static gboolean on_bars_done(gpointer data)
+{
+    BarsJob *job = data;
+    Player *p = player;
+    if (p && p->path && !strcmp(p->path, job->path)) {
+        p->bars_busy = false;
+        p->bars_known = true;
+        p->bars_found = job->found;
+        p->bars = job->crop;
+        if (p->fill) {
+            apply_zoom(p);
+            show_osd(p, job->found ? "Schwarze Balken ausgeblendet"
+                                   : "Keine Balken im Bild – Fenster gefüllt");
+        }
+    }
+    g_free(job->path);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer bars_thread(gpointer data)
+{
+    BarsJob *job = data;
+    job->found = md_detect_bars(job->path, &job->crop);
+    g_timeout_add_full(G_PRIORITY_DEFAULT, 0, on_bars_done, job, NULL);
+    return NULL;
+}
+
+/* Balken im Bild suchen (ffmpeg, einige Sekunden); bis dahin füllt das ganze Bild die Fläche */
+static void find_bars(Player *p)
+{
+    if (p->bars_known || p->bars_busy || !p->path) return;
+    p->bars_busy = true;
+    BarsJob *job = g_new0(BarsJob, 1);
+    job->path = g_strdup(p->path);
+    g_thread_unref(g_thread_new("balken", bars_thread, job));
+}
+
+static void set_fill(Player *p, bool fill)
+{
+    p->fill = fill;
+    p->zoom = 1;
+    if (fill) find_bars(p);
+    apply_zoom(p);
+    show_osd(p, !fill ? "Ganzes Bild"
+                : p->bars_busy ? "Schwarze Balken werden gesucht …"
+                : p->bars_found ? "Schwarze Balken ausgeblendet"
+                : "Keine Balken im Bild – Fenster gefüllt");
+}
+
+/* Zoom in Schritten, ausgehend von der jetzigen Größe */
+static void zoom_by(Player *p, double factor)
+{
+    int width = gtk_widget_get_allocated_width(p->zoom_box);
+    int height = gtk_widget_get_allocated_height(p->zoom_box);
+    double current = p->zoom;
+    if (p->fill && p->video_width > 0 && width > 0 && height > 0) {
+        GdkRectangle r;
+        video_rect(p, width, height, &r);
+        current = r.width / (p->video_width * MIN(width / p->video_width,
+                                                   height / p->video_height));
+    }
+    p->fill = false;
+    p->zoom = CLAMP(current * factor, 1.0, ZOOM_MAX);
+    if (p->zoom < 1.01) p->zoom = 1.0;
+    apply_zoom(p);
+    char *text = g_strdup_printf("Zoom %d %%", (int)(p->zoom * 100 + 0.5));
+    show_osd(p, p->zoom == 1.0 ? "Ganzes Bild" : text);
+    g_free(text);
+}
+
+static void on_zoom_fit(GtkMenuItem *item, gpointer data)
+{
+    (void)item;
+    set_fill(data, false);
+}
+
+static void on_zoom_fill(GtkMenuItem *item, gpointer data)
+{
+    (void)item;
+    set_fill(data, true);
+}
+
+static void on_zoom_in(GtkMenuItem *item, gpointer data)
+{
+    (void)item;
+    zoom_by(data, ZOOM_STEP);
+}
+
+static void on_zoom_out(GtkMenuItem *item, gpointer data)
+{
+    (void)item;
+    zoom_by(data, 1 / ZOOM_STEP);
+}
+
 /* ---------------------------------------------------------------------------
  * Steuerung
  * ------------------------------------------------------------------------- */
@@ -219,8 +467,14 @@ static void seek_to(Player *p, double seconds, bool accurate)
     seconds = MAX(seconds, 0);
     GstSeekFlags flags = GST_SEEK_FLAG_FLUSH | (accurate ? GST_SEEK_FLAG_ACCURATE
                                                          : GST_SEEK_FLAG_KEY_UNIT);
-    gst_element_seek_simple(p->playbin, GST_FORMAT_TIME, flags,
-                            (gint64)(seconds * GST_SECOND));
+    /* GStreamer meldet beim Springen kurz "pausiert"; das soll die Leiste nicht zeigen */
+    if (p->playing) p->seeking = true;
+    p->seek_target = seconds;
+    hide_subtitle(p);
+    p->seek_started = g_get_monotonic_time();
+    if (!gst_element_seek_simple(p->playbin, GST_FORMAT_TIME, flags,
+                                 (gint64)(seconds * GST_SECOND)))
+        p->seek_target = -1;
     if (p->ended) {
         p->ended = false;
         gst_element_set_state(p->playbin, GST_STATE_PLAYING);
@@ -235,14 +489,15 @@ static void toggle_play(Player *p)
         seek_to(p, 0, false);
         return;
     }
+    p->seeking = false;
     gst_element_set_state(p->playbin, p->playing ? GST_STATE_PAUSED : GST_STATE_PLAYING);
     if (p->playing) report(p, false);
 }
 
 static void toggle_fullscreen(Player *p)
 {
-    if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->win));
-    else gtk_window_fullscreen(GTK_WINDOW(p->win));
+    if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->toplevel));
+    else gtk_window_fullscreen(GTK_WINDOW(p->toplevel));
 }
 
 static void play_next(Player *p)
@@ -256,8 +511,11 @@ static void play_next(Player *p)
 
 static void change_volume(Player *p, double delta)
 {
-    double value = gtk_scale_button_get_value(GTK_SCALE_BUTTON(p->volume));
-    gtk_scale_button_set_value(GTK_SCALE_BUTTON(p->volume), CLAMP(value + delta, 0, 1));
+    double value = CLAMP(gtk_scale_button_get_value(GTK_SCALE_BUTTON(p->volume)) + delta, 0, 1);
+    gtk_scale_button_set_value(GTK_SCALE_BUTTON(p->volume), value);
+    char *text = g_strdup_printf("Lautstärke %d %%", (int)(value * 100 + 0.5));
+    show_osd(p, text);
+    g_free(text);
 }
 
 static void on_play_clicked(GtkButton *b, gpointer data)
@@ -316,30 +574,156 @@ static void on_open_external_clicked(GtkButton *b, gpointer data)
     (void)b;
     Player *p = data;
     char *uri = g_filename_to_uri(p->path, NULL, NULL);
-    if (uri) gtk_show_uri_on_window(GTK_WINDOW(p->win), uri, GDK_CURRENT_TIME, NULL);
+    if (uri) gtk_show_uri_on_window(GTK_WINDOW(p->toplevel), uri, GDK_CURRENT_TIME, NULL);
     g_free(uri);
 }
 
 /* ---------------------------------------------------------------------------
  * Ton und Untertitel
  * ------------------------------------------------------------------------- */
-/* Untertitel lassen sich in playbin nur beim Start ein- und ausschalten: Datei an derselben
- * Stelle neu öffnen. Läuft verzögert, weil das Menü noch sein Signal ausliefert. */
-static gboolean restart_pipeline(gpointer data)
+static void hide_subtitle(Player *p)
 {
-    Player *p = data;
-    if (!p->prerolled) return G_SOURCE_REMOVE;
-    p->start = current_position(p);
-    p->stay_paused = !p->playing && !p->ended;
-    p->ended = false;
-    gst_element_set_state(p->playbin, GST_STATE_NULL);
-    guint flags = 0;
-    g_object_get(p->playbin, "flags", &flags, NULL);
-    flags = p->want_text < 0 ? flags & ~PLAY_FLAG_TEXT : flags | PLAY_FLAG_TEXT;
-    g_object_set(p->playbin, "flags", flags, NULL);
-    p->prerolled = false;
-    gst_element_set_state(p->playbin, GST_STATE_PAUSED);
+    gtk_widget_hide(p->subtitle);
+    p->subtitle_end = -1;
+}
+
+/* Untertitel umschalten: playbin wählt die Spur, gezeigt wird nur bei gewählter Spur */
+static void apply_text(Player *p)
+{
+    if (p->want_text >= 0) g_object_set(p->playbin, "current-text", p->want_text, NULL);
+    else hide_subtitle(p);
+}
+
+typedef struct {
+    Player *player;
+    char *text;
+    bool markup;
+    double start, duration;
+} SubtitleCue;
+
+/* Text eines Untertitels zeigen (Hauptthread) */
+static gboolean on_subtitle(gpointer data)
+{
+    SubtitleCue *cue = data;
+    Player *p = cue->player;
+    if (p == player && !p->closing && p->want_text >= 0 && p->prerolled) {
+        char *clean = NULL;
+        /* Markup nur, wenn es gültig ist; sonst als reiner Text */
+        if (cue->markup && pango_parse_markup(cue->text, -1, 0, NULL, &clean, NULL, NULL)) {
+            gtk_label_set_markup(GTK_LABEL(p->subtitle), cue->text);
+        } else {
+            gtk_label_set_text(GTK_LABEL(p->subtitle), cue->text);
+        }
+        g_free(clean);
+        g_strstrip(cue->text);
+        gtk_widget_set_visible(p->subtitle, *cue->text != 0);
+        p->subtitle_start = cue->start;
+        p->subtitle_end = cue->start + (cue->duration > 0 ? cue->duration : SUBTITLE_MAX_SECONDS);
+    }
+    g_free(cue->text);
+    g_free(cue);
     return G_SOURCE_REMOVE;
+}
+
+/* appsink "new-sample", im Streaming-Thread: zur Spielzeit des Untertitels */
+static GstFlowReturn on_text_sample(GstElement *sink, gpointer data)
+{
+    GstSample *sample = NULL;
+    g_signal_emit_by_name(sink, "pull-sample", &sample);
+    if (!sample) return GST_FLOW_OK;
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    const GstSegment *segment = gst_sample_get_segment(sample);
+    GstCaps *caps = gst_sample_get_caps(sample);
+    GstMapInfo map;
+    if (buffer && GST_BUFFER_PTS_IS_VALID(buffer) && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        SubtitleCue *cue = g_new0(SubtitleCue, 1);
+        cue->player = data;
+        cue->text = g_utf8_make_valid((const char *)map.data, (gssize)map.size);
+        const char *format = caps && gst_caps_get_size(caps)
+                             ? gst_structure_get_string(gst_caps_get_structure(caps, 0), "format")
+                             : NULL;
+        cue->markup = !g_strcmp0(format, "pango-markup");
+        guint64 pts = GST_BUFFER_PTS(buffer);
+        if (segment) pts = gst_segment_to_stream_time(segment, GST_FORMAT_TIME, pts);
+        cue->start = (double)pts / GST_SECOND;
+        cue->duration = GST_BUFFER_DURATION_IS_VALID(buffer)
+                        ? (double)GST_BUFFER_DURATION(buffer) / GST_SECOND : 0;
+        gst_buffer_unmap(buffer, &map);
+        if (GST_CLOCK_TIME_IS_VALID(pts)) {
+            /* nicht als Idle: bei laufendem Video käme der Text sonst nie an die Reihe */
+            g_timeout_add_full(G_PRIORITY_DEFAULT, 0, on_subtitle, cue, NULL);
+        } else {                                    /* vor dem Anfang des Abschnitts */
+            g_free(cue->text);
+            g_free(cue);
+        }
+    }
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+}
+
+/* Untertitel abgelaufen oder weggesprungen? Schrift passend zur Bildhöhe */
+static void update_subtitle(Player *p)
+{
+    if (p->subtitle_end >= 0) {
+        double now = current_position(p);
+        if (now >= p->subtitle_end || now < p->subtitle_start - 1) hide_subtitle(p);
+    }
+    int size = MAX(gtk_widget_get_allocated_height(p->root) / 22, 14);
+    if (size != p->subtitle_size) {
+        p->subtitle_size = size;
+        PangoAttrList *attrs = pango_attr_list_new();
+        pango_attr_list_insert(attrs, pango_attr_size_new_absolute(size * PANGO_SCALE));
+        gtk_label_set_attributes(GTK_LABEL(p->subtitle), attrs);
+        pango_attr_list_unref(attrs);
+        gtk_widget_set_margin_bottom(p->subtitle, size * 2);
+    }
+}
+
+/* Taste A: nächste Tonspur */
+static void next_audio(Player *p)
+{
+    if (!p->prerolled) return;
+    if (p->audio_count < 2) {
+        show_osd(p, p->audio_count ? "Nur eine Tonspur" : "Keine Tonspur");
+        return;
+    }
+    int current = 0;
+    g_object_get(p->playbin, "current-audio", &current, NULL);
+    p->want_audio = (current + 1) % p->audio_count;
+    g_object_set(p->playbin, "current-audio", p->want_audio, NULL);
+    GstTagList *tags = NULL;
+    g_signal_emit_by_name(p->playbin, "get-audio-tags", p->want_audio, &tags);
+    char *name = track_name(tags, p->want_audio), *text = g_strdup_printf("Ton: %s", name);
+    show_osd(p, text);
+    g_free(name);
+    g_free(text);
+    if (tags) gst_tag_list_unref(tags);
+    build_track_menu(p, false);
+}
+
+/* Taste S: Untertitel aus → erste Spur → … → aus */
+static void next_text(Player *p)
+{
+    if (!p->prerolled) return;
+    if (!p->text_count) {
+        show_osd(p, "Keine Untertitel");
+        return;
+    }
+    p->want_text = p->want_text + 1 >= p->text_count ? -1 : p->want_text + 1;
+    if (p->want_text < 0) {
+        show_osd(p, "Untertitel aus");
+    } else {
+        GstTagList *tags = NULL;
+        g_signal_emit_by_name(p->playbin, "get-text-tags", p->want_text, &tags);
+        char *name = track_name(tags, p->want_text);
+        char *text = g_strdup_printf("Untertitel: %s", name);
+        show_osd(p, text);
+        g_free(name);
+        g_free(text);
+        if (tags) gst_tag_list_unref(tags);
+    }
+    apply_text(p);
+    build_track_menu(p, true);
 }
 
 static void on_track_chosen(GtkCheckMenuItem *item, gpointer data)
@@ -350,7 +734,7 @@ static void on_track_chosen(GtkCheckMenuItem *item, gpointer data)
     if (g_object_get_data(G_OBJECT(item), "text")) {
         if (index == p->want_text) return;
         p->want_text = index;
-        g_idle_add(restart_pipeline, p);
+        apply_text(p);
     } else {
         p->want_audio = index;
         g_object_set(p->playbin, "current-audio", index, NULL);
@@ -378,7 +762,7 @@ static void build_track_menu(Player *p, bool text)
     guint flags = 0;
     g_object_get(p->playbin, text ? "n-text" : "n-audio", &count,
                  text ? "current-text" : "current-audio", &current, "flags", &flags, NULL);
-    bool shown = text ? (flags & PLAY_FLAG_TEXT) != 0 : true;
+    bool shown = text ? p->want_text >= 0 : true;
     GtkWidget *menu = gtk_menu_new();
     GSList *group = NULL;
     if (text) add_track_item(menu, &group, "Aus", -1, true, !shown, p);
@@ -390,9 +774,21 @@ static void build_track_menu(Player *p, bool text)
         g_free(name);
         if (tags) gst_tag_list_unref(tags);
     }
+    if (text) p->text_count = count;
+    else p->audio_count = count;
+    /* immer sichtbar, damit man weiß, wo es die Wahl gibt; ohne Wahl nur grau */
+    bool choice = text ? count > 0 : count > 1;
+    if (!choice) {
+        GtkWidget *none = gtk_menu_item_new_with_label(text ? "Keine Untertitel in dieser Datei"
+                                                            : "Nur eine Tonspur");
+        gtk_widget_set_sensitive(none, FALSE);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), none);
+    }
     gtk_widget_show_all(menu);
     gtk_menu_button_set_popup(GTK_MENU_BUTTON(button), menu);
-    gtk_widget_set_visible(button, text ? count > 0 : count > 1);
+    gtk_widget_set_sensitive(button, choice);
+    gtk_widget_set_tooltip_text(button, text ? (choice ? "Untertitel (S)" : "Keine Untertitel")
+                                             : (choice ? "Tonspur (A)" : "Nur eine Tonspur"));
 }
 
 /* ---------------------------------------------------------------------------
@@ -402,6 +798,7 @@ static void finish_file(Player *p)
 {
     p->ended = true;
     p->playing = false;
+    p->seeking = false;
     report(p, false);
     if (p->next_path) {
         play_next(p);
@@ -412,7 +809,7 @@ static void finish_file(Player *p)
     update_inhibit(p);
     update_time(p);
     show_bar(p);
-    if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->win));
+    if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->toplevel));
 }
 
 static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
@@ -421,19 +818,21 @@ static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
     Player *p = data;
     switch (GST_MESSAGE_TYPE(message)) {
     case GST_MESSAGE_ASYNC_DONE:
+        p->seek_target = -1;                        /* Sprung fertig */
         if (!p->prerolled) {
             p->prerolled = true;
             p->duration = query_seconds(p->playbin, true);
+            read_video_size(p);
+            apply_zoom(p);
             if (p->want_audio >= 0) g_object_set(p->playbin, "current-audio", p->want_audio, NULL);
-            if (p->want_text >= 0) g_object_set(p->playbin, "current-text", p->want_text, NULL);
+            apply_text(p);
             if (p->start > 0 && (p->duration <= 0 || p->start < p->duration - 1))
                 gst_element_seek_simple(p->playbin, GST_FORMAT_TIME,
                                         GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE,
                                         (gint64)(p->start * GST_SECOND));
             build_track_menu(p, false);
             build_track_menu(p, true);
-            if (!p->stay_paused) gst_element_set_state(p->playbin, GST_STATE_PLAYING);
-            p->stay_paused = false;
+            gst_element_set_state(p->playbin, GST_STATE_PLAYING);
             update_time(p);
         }
         break;
@@ -443,6 +842,8 @@ static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
             gst_message_parse_state_changed(message, NULL, &state, &pending);
             /* beim Springen hält die Pipeline kurz an und läuft gleich weiter */
             if (pending == GST_STATE_PLAYING) break;
+            if (p->seeking && state != GST_STATE_PLAYING) break;
+            p->seeking = false;
             p->playing = state == GST_STATE_PLAYING;
             update_play_button(p);
             update_inhibit(p);
@@ -473,6 +874,7 @@ static gboolean on_tick(gpointer data)
 {
     Player *p = data;
     update_time(p);
+    update_subtitle(p);
     if (p->playing && g_get_monotonic_time() - p->last_report >= REPORT_SECONDS * G_USEC_PER_SEC)
         report(p, false);
     return G_SOURCE_CONTINUE;
@@ -491,11 +893,16 @@ static void load_file(Player *p, const char *path, const char *title, double sta
     p->title = g_strdup(title ? title : "");
     p->start = start >= RESUME_MIN ? start : 0;
     p->want_audio = p->want_text = -1;
-    p->stay_paused = false;
+    hide_subtitle(p);
+    p->audio_count = p->text_count = 0;
+    p->seeking = false;
+    p->seek_target = -1;
     p->duration = 0;
     p->prerolled = p->ended = p->playing = false;
+    /* Zoom gilt weiter, die Balken gehören zur Datei */
+    p->bars_known = p->bars_found = p->bars_busy = false;
+    if (p->fill) find_bars(p);
     gtk_widget_hide(p->error_box);
-    gtk_window_set_title(GTK_WINDOW(p->win), *p->title ? p->title : "Player");
     gtk_label_set_text(GTK_LABEL(p->title_label), p->title);
     gtk_label_set_text(GTK_LABEL(p->time_label), "");
     if (p->hooks.next) p->next_path = p->hooks.next(path, &p->next_title, p->hooks.data);
@@ -505,12 +912,12 @@ static void load_file(Player *p, const char *path, const char *title, double sta
         gtk_widget_set_tooltip_text(p->next, tip);
         g_free(tip);
     }
-    gtk_widget_hide(p->audio_button);
-    gtk_widget_hide(p->text_button);
+    gtk_widget_set_sensitive(p->audio_button, FALSE);
+    gtk_widget_set_sensitive(p->text_button, FALSE);
     char *uri = g_filename_to_uri(path, NULL, NULL);
     guint flags = 0;
     g_object_get(p->playbin, "flags", &flags, NULL);
-    g_object_set(p->playbin, "uri", uri, "flags", flags & ~PLAY_FLAG_TEXT, NULL);
+    g_object_set(p->playbin, "uri", uri, "flags", flags | PLAY_FLAG_TEXT, NULL);
     g_free(uri);
     gst_element_set_state(p->playbin, GST_STATE_PAUSED);
     update_play_button(p);
@@ -526,9 +933,15 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     (void)w;
     Player *p = data;
     guint key = gdk_keyval_to_lower(e->keyval);
-    /* Springen soll das Bild nicht mit der Leiste verdecken */
-    if (key != GDK_KEY_Left && key != GDK_KEY_Right && key != GDK_KEY_j && key != GDK_KEY_l)
-        show_bar(p);
+    /* Springen, Zoom und Spurwechsel sollen das Bild nicht mit der Leiste verdecken; sie zeigen
+     * höchstens einen kurzen Hinweis */
+    static const guint QUIET[] = {GDK_KEY_Left, GDK_KEY_Right, GDK_KEY_j, GDK_KEY_l, GDK_KEY_z,
+                                  GDK_KEY_plus, GDK_KEY_KP_Add, GDK_KEY_minus,
+                                  GDK_KEY_KP_Subtract, GDK_KEY_0, GDK_KEY_KP_0, GDK_KEY_a,
+                                  GDK_KEY_s, GDK_KEY_Up, GDK_KEY_Down};
+    bool quiet = false;
+    for (size_t i = 0; i < G_N_ELEMENTS(QUIET); i++) quiet |= key == QUIET[i];
+    if (!quiet) show_bar(p);
     switch (key) {
     case GDK_KEY_space: case GDK_KEY_k: toggle_play(p); break;
     case GDK_KEY_Left: case GDK_KEY_j: seek_to(p, current_position(p) - SEEK_STEP, true); break;
@@ -537,6 +950,12 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     case GDK_KEY_Down: change_volume(p, -VOLUME_STEP); break;
     case GDK_KEY_f: case GDK_KEY_F11: toggle_fullscreen(p); break;
     case GDK_KEY_n: play_next(p); break;
+    case GDK_KEY_a: next_audio(p); break;
+    case GDK_KEY_s: next_text(p); break;
+    case GDK_KEY_z: set_fill(p, !p->fill); break;
+    case GDK_KEY_plus: case GDK_KEY_KP_Add: zoom_by(p, ZOOM_STEP); break;
+    case GDK_KEY_minus: case GDK_KEY_KP_Subtract: zoom_by(p, 1 / ZOOM_STEP); break;
+    case GDK_KEY_0: case GDK_KEY_KP_0: set_fill(p, false); break;
     case GDK_KEY_m: {
         gboolean mute = FALSE;
         g_object_get(p->playbin, "mute", &mute, NULL);
@@ -544,8 +963,8 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
         break;
     }
     case GDK_KEY_Escape:
-        if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->win));
-        else gtk_widget_destroy(p->win);
+        if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->toplevel));
+        else md_player_close();
         break;
     default:
         return FALSE;
@@ -572,14 +991,29 @@ static gboolean on_video_press(GtkWidget *w, GdkEventButton *e, gpointer data)
     return TRUE;
 }
 
+/* Titelleiste samt Reitern nur außerhalb des Vollbilds */
+static void show_titlebar(Player *p, bool shown)
+{
+    GtkWidget *titlebar = gtk_window_get_titlebar(GTK_WINDOW(p->toplevel));
+    if (titlebar) gtk_widget_set_visible(titlebar, shown);
+}
+
 static gboolean on_window_state(GtkWidget *w, GdkEventWindowState *e, gpointer data)
 {
     (void)w;
     Player *p = data;
     p->is_fullscreen = (e->new_window_state & GDK_WINDOW_STATE_FULLSCREEN) != 0;
+    show_titlebar(p, !p->is_fullscreen);
     set_icon(p->fullscreen, p->is_fullscreen ? "view-restore-symbolic"
                                              : "view-fullscreen-symbolic");
     return FALSE;
+}
+
+static void on_close_clicked(GtkButton *b, gpointer data)
+{
+    (void)b;
+    (void)data;
+    md_player_close();
 }
 
 static void on_destroy(GtkWidget *w, gpointer data)
@@ -587,8 +1021,13 @@ static void on_destroy(GtkWidget *w, gpointer data)
     (void)w;
     Player *p = data;
     report(p, true);
+    g_signal_handlers_disconnect_by_data(p->toplevel, p);
+    if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->toplevel));
+    show_titlebar(p, true);
+    set_cursor_visible(p, true);
     if (p->tick) g_source_remove(p->tick);
     if (p->hide_timer) g_source_remove(p->hide_timer);
+    if (p->osd_timer) g_source_remove(p->osd_timer);
     p->playing = false;
     update_inhibit(p);
     gst_element_set_state(p->playbin, GST_STATE_NULL);
@@ -616,6 +1055,9 @@ static GtkWidget *build_bar(Player *p)
     gtk_box_pack_start(GTK_BOX(bar), p->scale, FALSE, FALSE, 0);
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *close = new_bar_button("go-previous-symbolic", "Zurück (Esc)");
+    g_signal_connect(close, "clicked", G_CALLBACK(on_close_clicked), p);
+    gtk_box_pack_start(GTK_BOX(row), close, FALSE, FALSE, 0);
     p->play = new_bar_button("media-playback-start-symbolic", "Abspielen");
     g_signal_connect(p->play, "clicked", G_CALLBACK(on_play_clicked), p);
     GtkWidget *back = new_bar_button("media-seek-backward-symbolic", "10 Sekunden zurück");
@@ -654,8 +1096,28 @@ static GtkWidget *build_bar(Player *p)
     gtk_widget_set_tooltip_text(p->text_button, "Untertitel");
     gtk_widget_set_can_focus(p->audio_button, FALSE);
     gtk_widget_set_can_focus(p->text_button, FALSE);
-    gtk_widget_set_no_show_all(p->audio_button, TRUE);
-    gtk_widget_set_no_show_all(p->text_button, TRUE);
+    GtkWidget *zoom = gtk_menu_button_new();
+    gtk_button_set_image(GTK_BUTTON(zoom),
+                         gtk_image_new_from_icon_name("zoom-fit-best-symbolic",
+                                                      GTK_ICON_SIZE_LARGE_TOOLBAR));
+    gtk_button_set_relief(GTK_BUTTON(zoom), GTK_RELIEF_NONE);
+    gtk_widget_set_tooltip_text(zoom, "Zoom und schwarze Balken");
+    gtk_widget_set_can_focus(zoom, FALSE);
+    GtkWidget *zoom_menu = gtk_menu_new();
+    static const struct {
+        const char *label;
+        GCallback handler;
+    } ZOOM_ITEMS[] = {{"Ganzes Bild (0)", G_CALLBACK(on_zoom_fit)},
+                      {"Schwarze Balken ausblenden (Z)", G_CALLBACK(on_zoom_fill)},
+                      {"Vergrößern (+)", G_CALLBACK(on_zoom_in)},
+                      {"Verkleinern (−)", G_CALLBACK(on_zoom_out)}};
+    for (size_t i = 0; i < G_N_ELEMENTS(ZOOM_ITEMS); i++) {
+        GtkWidget *item = gtk_menu_item_new_with_label(ZOOM_ITEMS[i].label);
+        g_signal_connect(item, "activate", ZOOM_ITEMS[i].handler, p);
+        gtk_menu_shell_append(GTK_MENU_SHELL(zoom_menu), item);
+    }
+    gtk_widget_show_all(zoom_menu);
+    gtk_menu_button_set_popup(GTK_MENU_BUTTON(zoom), zoom_menu);
     p->volume = gtk_volume_button_new();
     gtk_scale_button_set_value(GTK_SCALE_BUTTON(p->volume), last_volume);
     gtk_widget_set_can_focus(p->volume, FALSE);
@@ -664,6 +1126,7 @@ static GtkWidget *build_bar(Player *p)
     g_signal_connect(p->fullscreen, "clicked", G_CALLBACK(on_fullscreen_clicked), p);
     gtk_box_pack_end(GTK_BOX(row), p->fullscreen, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(row), p->volume, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(row), zoom, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(row), p->text_button, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(row), p->audio_button, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar), row, FALSE, FALSE, 0);
@@ -702,25 +1165,8 @@ static void load_css(void)
     g_object_unref(css);
 }
 
-/* 16:9, höchstens 1280 breit und vier Fünftel des Bildschirms */
-static void set_default_size(GtkWidget *win, GtkWindow *parent)
-{
-    int width = DEFAULT_WIDTH, height = DEFAULT_WIDTH * 9 / 16;
-    GdkWindow *window = parent ? gtk_widget_get_window(GTK_WIDGET(parent)) : NULL;
-    GdkMonitor *monitor = window ? gdk_display_get_monitor_at_window(
-                                       gdk_window_get_display(window), window) : NULL;
-    if (monitor) {
-        GdkRectangle area;
-        gdk_monitor_get_workarea(monitor, &area);
-        width = MIN(width, area.width * 4 / 5);
-        height = MIN(width * 9 / 16, area.height * 4 / 5);
-        width = MIN(width, height * 16 / 9);
-    }
-    gtk_window_set_default_size(GTK_WINDOW(win), width, height);
-}
-
-/* Fenster samt Pipeline anlegen; NULL = GStreamer fehlt */
-static Player *player_new(GtkWindow *parent)
+/* Seite samt Pipeline anlegen; NULL = GStreamer fehlt */
+static Player *player_new(GtkStack *stack)
 {
     GstElement *playbin = gst_element_factory_make("playbin", NULL);
     GstElement *sink = gst_element_factory_make("gtksink", NULL);
@@ -732,26 +1178,34 @@ static Player *player_new(GtkWindow *parent)
     load_css();
     Player *p = g_new0(Player, 1);
     p->playbin = playbin;
+    p->sink = sink;
+    p->zoom = 1;
+    p->seek_target = -1;
     g_object_get(sink, "widget", &p->video, NULL);
+    GstElement *text_sink = gst_element_factory_make("appsink", NULL);
+    if (text_sink) {
+        /* async aus: Untertitel kommen selten, der Start darf nicht auf sie warten */
+        g_object_set(text_sink, "emit-signals", TRUE, "sync", TRUE, "async", FALSE, NULL);
+        g_signal_connect(text_sink, "new-sample", G_CALLBACK(on_text_sample), p);
+        g_object_set(playbin, "text-sink", text_sink, NULL);
+    }
     g_object_set(playbin, "video-sink", sink, "volume", last_volume, NULL);
     GstBus *bus = gst_element_get_bus(playbin);
     gst_bus_add_watch(bus, on_bus, p);
     gst_object_unref(bus);
 
-    p->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    set_default_size(p->win, parent);
-    gtk_window_set_icon_name(GTK_WINDOW(p->win), "mediathek-downloader");
-    if (parent) gtk_window_set_transient_for(GTK_WINDOW(p->win), parent);
-    gtk_window_set_destroy_with_parent(GTK_WINDOW(p->win), TRUE);
-    gtk_style_context_add_class(gtk_widget_get_style_context(p->win), "zd-player");
-    gtk_widget_add_events(p->win, GDK_POINTER_MOTION_MASK);
+    /* eigenes Fenster der Seite: schwarzer Grund und Mausbewegungen über Bild und Leiste */
+    p->root = gtk_event_box_new();
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->root), "zd-player");
+    gtk_widget_add_events(p->root, GDK_POINTER_MOTION_MASK);
 
     GtkWidget *overlay = gtk_overlay_new();
-    GtkWidget *events = gtk_event_box_new();
-    gtk_container_add(GTK_CONTAINER(events), p->video);
-    g_object_unref(p->video);       /* gehört jetzt dem Fenster */
-    g_signal_connect(events, "button-press-event", G_CALLBACK(on_video_press), p);
-    gtk_container_add(GTK_CONTAINER(overlay), events);
+    p->zoom_box = g_object_new(zoom_box_get_type(), NULL);
+    ((ZoomBox *)p->zoom_box)->player = p;
+    gtk_container_add(GTK_CONTAINER(p->zoom_box), p->video);
+    g_object_unref(p->video);       /* gehört jetzt der Seite */
+    g_signal_connect(p->zoom_box, "button-press-event", G_CALLBACK(on_video_press), p);
+    gtk_container_add(GTK_CONTAINER(overlay), p->zoom_box);
     p->revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(p->revealer),
                                      GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
@@ -759,14 +1213,38 @@ static Player *player_new(GtkWindow *parent)
     gtk_container_add(GTK_CONTAINER(p->revealer), build_bar(p));
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->revealer);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), build_error_box(p));
-    gtk_container_add(GTK_CONTAINER(p->win), overlay);
+    p->osd = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->osd), "osd");
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->osd), "zd-player-osd");
+    gtk_widget_set_halign(p->osd, GTK_ALIGN_START);
+    gtk_widget_set_valign(p->osd, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(p->osd, 20);
+    gtk_widget_set_margin_top(p->osd, 20);
+    gtk_widget_set_no_show_all(p->osd, TRUE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->osd);
+    p->subtitle = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->subtitle), "zd-player-subtitle");
+    gtk_label_set_justify(GTK_LABEL(p->subtitle), GTK_JUSTIFY_CENTER);
+    gtk_label_set_line_wrap(GTK_LABEL(p->subtitle), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(p->subtitle), 60);
+    gtk_widget_set_halign(p->subtitle, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(p->subtitle, GTK_ALIGN_END);
+    gtk_widget_set_no_show_all(p->subtitle, TRUE);
+    p->subtitle_end = -1;
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->subtitle);
+    /* Klicks gehen durch den Text hindurch ans Bild */
+    gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->subtitle, TRUE);
+    gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->osd, TRUE);
+    gtk_container_add(GTK_CONTAINER(p->root), overlay);
 
-    g_signal_connect(p->win, "key-press-event", G_CALLBACK(on_key), p);
-    g_signal_connect(p->win, "motion-notify-event", G_CALLBACK(on_motion), p);
-    g_signal_connect(p->win, "window-state-event", G_CALLBACK(on_window_state), p);
-    g_signal_connect(p->win, "destroy", G_CALLBACK(on_destroy), p);
+    p->toplevel = gtk_widget_get_toplevel(GTK_WIDGET(stack));
+    g_signal_connect(p->toplevel, "key-press-event", G_CALLBACK(on_key), p);
+    g_signal_connect(p->toplevel, "window-state-event", G_CALLBACK(on_window_state), p);
+    g_signal_connect(p->root, "motion-notify-event", G_CALLBACK(on_motion), p);
+    g_signal_connect(p->root, "destroy", G_CALLBACK(on_destroy), p);
     p->tick = g_timeout_add(PLAYER_TICK_MS, on_tick, p);
-    gtk_widget_show_all(p->win);
+    gtk_widget_show_all(p->root);
+    gtk_stack_add_named(stack, p->root, "player");
     return p;
 }
 
@@ -799,7 +1277,16 @@ const char *md_player_current(void)
     return player ? player->path : NULL;
 }
 
-bool md_player_play(GtkWindow *parent, const char *path, const char *title, double start,
+void md_player_close(void)
+{
+    Player *p = player;
+    if (!p || p->closing) return;
+    p->closing = true;
+    if (p->hooks.closed) p->hooks.closed(p->hooks.data);
+    gtk_widget_destroy(p->root);                    /* räumt in on_destroy auf */
+}
+
+bool md_player_play(GtkStack *stack, const char *path, const char *title, double start,
                     const MdPlayerHooks *hooks)
 {
     if (!player) {
@@ -808,7 +1295,7 @@ bool md_player_play(GtkWindow *parent, const char *path, const char *title, doub
             g_free(why);
             return false;
         }
-        player = player_new(parent);
+        player = player_new(stack);
         if (!player) return false;
     }
     /* der alte Stand geht noch an die bisherigen Empfänger */
@@ -816,6 +1303,6 @@ bool md_player_play(GtkWindow *parent, const char *path, const char *title, doub
     g_clear_pointer(&player->path, g_free);
     player->hooks = *hooks;
     load_file(player, path, title, start);
-    gtk_window_present(GTK_WINDOW(player->win));
+    gtk_stack_set_visible_child(stack, player->root);
     return true;
 }
