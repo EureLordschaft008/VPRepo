@@ -64,6 +64,20 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.3.1 (07.11.2026)
+- Freie Suche in der Oberfläche: Enter im Suchfeld der Vorschau sucht in allen Mediatheken.
+- Tastenkürzel: Strg+1–6 wählen die Reiter, Strg+F sucht, F5 lädt neu, F1 zeigt alle Kürzel.
+  Das Menü hat „Erste Schritte“.
+- Player: Bild im Bild beim Reiterwechsel, ? oder F1 blenden die Tasten ein, Tooltips nennen ihre
+  Taste, 10-Sekunden-Sprünge ohne Wartezeit; das Mausrad verstellt die Zeitleiste nicht mehr.
+- Meine Videos: jede Serie nur einmal, Filter nach Kategorie, nachträgliche AV1-Umwandlung.
+- Jede Folge zeigt, wie viel davon gesehen ist („40 % · noch 25 min“), auch in der Vorschau.
+- Der Reiter Bibliothek ist weg, „Downloads“ heißt jetzt „Warteschlange“.
+- Einstellungen: AV1-Umwandlung als „Platz sparen“ mit den Stufen Gut, Sehr gut und Beste; der
+  Ordner für die Programmdaten ist frei wählbar.
+- „Fehlgeschlagene entfernen“ fragt nach und nennt die Größe der halbfertigen Dateien;
+  Fehlermeldungen sagen, ob „Erneut versuchen“ hilft.
+
 ### 2.2.0 (06.11.2026)
 - Der Player läuft im Hauptfenster statt in einem eigenen; im Vollbild verschwindet die Titelleiste.
 - Springen mit den Pfeiltasten blendet die Leiste nicht mehr ein, die Zeitleiste blinkt nicht mehr.
