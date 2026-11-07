@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.2.0"
+#define MD_VERSION "2.3.1"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -138,7 +138,18 @@ typedef struct {
 void md_init(bool persist);
 /* laufende Arbeit anhalten (.part-Dateien bleiben) und Warteschlange sichern */
 void md_shutdown(void);
+/* Datenordner: Einstellungen, Verlauf, Warteschlange, Protokoll und Zwischenspeicher */
 const char *md_app_dir(void);
+const char *md_data_parent(void);           /* gewählter Ordner, NULL = Standard */
+char *md_default_data_dir(void);            /* Datenordner ohne Wahl */
+/* Fehlermeldung, wenn der gewählte Ordner beim Start nicht erreichbar war, sonst NULL */
+const char *md_data_problem(void);
+/* Datenordner nach "<parent>/Mediathek Downloader" verlegen (NULL = Standard) und alles
+ * mitnehmen; der Zwischenspeicher folgt im Hintergrund. false = nicht alles ging (*error) */
+bool md_set_data_parent(const char *parent, char **error);
+/* Dateien des Zwischenspeichers (nur diese) aus old_dir in den Datenordner holen, im
+ * Hintergrund; für den eigenen Cacheordner bis 2.2 */
+void md_adopt_cache(const char *old_dir);
 const char *md_log_path(void);
 void md_log(const char *format, ...) G_GNUC_PRINTF(1, 2);
 bool md_have_tools(char **missing);     /* curl, ffmpeg, ffprobe vorhanden? */
@@ -171,8 +182,6 @@ char *md_cover_file(const char *website, const char *video);
 /* Altersfreigabe und Kategorien von der Seite des Titels (blockiert); NULL = nicht erreichbar */
 MdPageInfo *md_page_info(const char *website);
 void md_page_info_free(MdPageInfo *info);
-void md_set_cover_dir(const char *dir);     /* Ordner der Titelbilder; NULL = Standard */
-char *md_default_cover_dir(void);           /* ~/.mediathek-downloader/bilder */
 
 /* Adresse der passenden IMDb-Seite, sonst der IMDb-Suche (blockiert). Freigeben mit g_free. */
 char *md_imdb_url(const char *name, bool is_film);
@@ -186,6 +195,9 @@ bool md_imdb_info(const char *name, bool is_film, MdImdbInfo *info);
 /* --- Warteschlange ------------------------------------------------------ */
 /* -> Auftragsnummer; 0 = schon in der Warteschlange */
 guint md_queue_add(const MdTitle *title, const MdJobOptions *options);
+/* Schon geladene Datei path (aus dem Verlauf) nachträglich nach AV1 umwandeln; Encoder,
+ * Qualität und keep_original aus o. -> Auftragsnummer; 0 = nicht im Verlauf oder schon in Arbeit */
+guint md_queue_convert(const char *path, const MdJobOptions *o);
 MdJobView *md_queue_snapshot(int *count);
 void md_queue_snapshot_free(MdJobView *views, int count);
 void md_job_set_paused(guint id, bool paused);
@@ -198,6 +210,8 @@ void md_job_retry(guint id);
 void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dateien */
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
 void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
+gint64 md_job_partial_bytes(guint id);  /* Größe der halbfertigen Dateien eines Auftrags */
+gint64 md_queue_failed_bytes(int *count); /* dasselbe für alle Fehlschläge, count = Anzahl */
 void md_set_rate_limit(gint64 bytes_per_second);    /* 0 = unbegrenzt, gilt sofort */
 void md_set_parallel(int downloads, int conversions);
 /* Encoder für alle offenen Aufträge; eine laufende Umwandlung bleibt, wie sie ist */

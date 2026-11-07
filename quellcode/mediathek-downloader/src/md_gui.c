@@ -7,8 +7,7 @@
  *   Neue Folgen    was bei schon geladenen Serien seit dem letzten Download dazugekommen ist
  *   Meine Videos   alles Geladene als Kacheln, Serien mit Staffeln und Folgen; abgespielt wird
  *                  im eingebauten Player (md_player.c), der sich den Stand jeder Datei merkt
- *   Downloads      Warteschlange mit Pause, Fortsetzen und Tempolimit
- *   Bibliothek     alles, was schon geladen wurde, nach Sendung sortiert
+ *   Warteschlange  Downloads mit Pause, Fortsetzen und Tempolimit
  *   Einstellungen  Speicherort, Qualität, AV1
  *
  * Die Startliste läuft in einem eigenen Thread, das Ergebnis kommt über g_idle_add() in den
@@ -16,7 +15,7 @@
  * 500 ms den Stand ab. Der gesamte Zustand der Oberfläche liegt in der Struktur "ui".
  *
  * Aufbau dieser Datei: kleine Helfer – Einstellungen – Trefferbaum – Spurenauswahl –
- * Seite Vorschau – Seite Neue Folgen – Seite Downloads – Seite Bibliothek – Seite Meine Videos –
+ * Seite Vorschau – Seite Neue Folgen – Seite Warteschlange – Seite Meine Videos –
  * Seite Einstellungen –
  * Fenster, Menü, Programmstart
  *
@@ -46,6 +45,7 @@
 #define SETTINGS_FILE "einstellungen.ini"
 #define RESULT_ROWS_BATCH 200   /* Zeilen der Trefferliste auf einmal (weitere per Knopf) */
 #define TICK_MS 500
+#define INFO_LINES_MAX 3        /* so viele Meldungen zeigt die Leiste übereinander */
 #define JOB_ROWS_BATCH 100      /* Zeilen der Downloadliste auf einmal (weitere per Knopf) */
 #define PREVIEW_TILES_BATCH 30  /* Kacheln je Abschnitt auf einmal (weitere per Knopf) */
 #define PREVIEW_FILM_MIN_MINUTES 40
@@ -70,9 +70,10 @@
 #define ALL_LANGUAGES "Alle Sprachen"
 #define SOURCE_COUNT 25
 #define WATCH_FILE "wiedergabe.tsv"
+#define VIDEO_GENRES_FILE "kategorien.tsv"  /* Kategorien der geladenen Serien und Filme */
 #define WATCHED_SHARE 0.95      /* ab diesem Anteil gilt eine Datei als gesehen (Abspann) */
 #define RESUME_MIN_SECONDS 10   /* kürzer angeschaut zählt nicht als angefangen */
-#define VIDEOS_ROW_TILES 12     /* Kacheln in "Weiterschauen" und "Zuletzt geladen" */
+#define VIDEOS_ROW_TILES 12     /* Kacheln in "Weiterschauen" */
 #define FRAME_THREADS 2
 #define ROW_SCROLL_STEP 60.0    /* Pixel je Schritt des Mausrads über einer Reihe */
 #define TILES_PER_LINE_MAX 24   /* auch sehr breite Fenster füllen sich mit Kacheln */
@@ -90,11 +91,21 @@ static const char *const QUALITY_TEXT[3] = {"Hoch – 1080p (ca. 4,5 GB je 90 mi
                                             "Mittel (ca. 2,3 GB je 90 min)",
                                             "Niedrig (ca. 0,5 GB je 90 min)"};
 #ifdef G_OS_WIN32
-static const char *const ENCODER_TEXT[2] = {"GPU – schnell (NVENC, QSV oder AMF)",
-                                            "CPU – langsam (SVT-AV1)"};
+static const char *const ENCODER_TEXT[2] = {"Grafikkarte – schnell (NVENC, QSV oder AMF)",
+                                            "Prozessor – langsam (SVT-AV1)"};
 #else
-static const char *const ENCODER_TEXT[2] = {"GPU – schnell (VAAPI)", "CPU – langsam (SVT-AV1)"};
+static const char *const ENCODER_TEXT[2] = {"Grafikkarte – schnell (VAAPI)",
+                                            "Prozessor – langsam (SVT-AV1)"};
 #endif
+/* Qualitätsstufen der Umwandlung: Werte für Grafikkarte und Prozessor (kleiner = besser);
+ * passt die Einstellung zu keiner Stufe, gilt "Eigene Werte" */
+static const struct {
+    const char *text;
+    int gpu, cpu;
+} AV1_LEVELS[] = {{"Gut – kleinste Dateien", 80, 40},
+                  {"Sehr gut – empfohlen", 64, 35},
+                  {"Beste – größere Dateien", 48, 28}};
+#define AV1_LEVEL_CUSTOM G_N_ELEMENTS(AV1_LEVELS)
 
 typedef enum { ROW_GROUP, ROW_SEASON, ROW_ITEM } RowKind;
 
@@ -134,6 +145,7 @@ typedef struct {
     char *fsk;
     MdImdbInfo imdb;
     int imdb_state;             /* IMDB_UNKNOWN … */
+    char *found_by;             /* Suchbegriff (klein), mit dem die Suche den Titel fand */
     GtkWidget *tile_image, *tile_check, *tile_sub, *tile_badges;
 } Group;
 
@@ -168,6 +180,7 @@ typedef struct {
 typedef struct {
     char *key, *name;
     bool is_film;
+    bool videos;                /* für "Meine Videos" statt für die Vorschau */
     char **genres;
 } GenreJob;
 
@@ -179,6 +192,14 @@ typedef struct {
     char *dir, *error;
     GPtrArray *items;           /* Item* */
 } PreviewJob;
+
+/* freie Suche in allen Mediatheken */
+typedef struct {
+    char *text, *dir, *error;
+    int min_minutes;
+    bool hide_variants, truncated;
+    GPtrArray *items;           /* Item* */
+} SearchJob;
 
 /* alle Folgen einer Serie im Hintergrund */
 typedef struct {
@@ -243,7 +264,7 @@ typedef struct {
 } JobRow;
 
 typedef struct {
-    char *dir, *cache_dir;
+    char *dir;
     int quality, encoder, gpu_quality, cpu_rf;
     int parallel, conversions, min_minutes;
     double limit_mb;
@@ -302,6 +323,9 @@ typedef struct {
     GQueue *cover_order;        /* Seiten in der Reihenfolge des Ladens, für COVER_CACHE_MAX */
     int film_limit, series_limit, series_loading;
     bool preview_busy, preview_refreshed;
+    char *searching;            /* Begriff der laufenden Suche, NULL = keine */
+    char *searched, *search_result;     /* letzter Suchbegriff (klein) und was sie fand */
+    GtkWidget *search_hint;
     ResultTree detail_tree;     /* Liste der offenen Detailansicht */
     Group *detail_group;
     GtkWidget *detail_note, *detail_rating;
@@ -318,14 +342,15 @@ typedef struct {
     GHashTable *job_rows;       /* id -> JobRow* */
     GHashTable *job_marks;      /* Nummer -> JobMark: Stand beim letzten Timer-Schlag */
 
-    /* Bibliothek */
-    GtkWidget *library_hero, *library_sub, *library_list, *library_search;
-    GHashTable *library_open;   /* aufgeklappte Sendungen */
 
     /* Meine Videos */
     GtkWidget *videos_stack, *videos_scroller, *videos_sub, *videos_search, *videos_content;
     GtkWidget *stats_scroller, *stats_sub, *stats_content;
     GtkWidget *videos_check;    /* "Ordner prüfen" */
+    GtkWidget *videos_genre, *videos_sort;
+    GHashTable *video_genres;   /* "S:name" bzw. "F:name" -> Kategorien (leer = keine) */
+    GHashTable *video_genres_asked;     /* Schlüssel, die gerade bei IMDb nachgefragt werden */
+    bool updating_video_genres;
     GtkWidget *show_scroller, *show_title, *show_sub, *show_play, *show_seasons, *show_episodes;
     MdHistoryEntry *videos;     /* Verlauf, auf den die Kacheln zeigen */
     int video_count;
@@ -341,7 +366,9 @@ typedef struct {
     bool closed;                /* Hauptfenster abgebaut; der Player meldet sich danach noch */
 
     /* Einstellungen */
+    GtkWidget *data_reset;
     GtkWidget *dir_sub, *cache_sub, *encoder_row, *encoder_sub, *gpu_row, *cpu_row, *keep_row;
+    GtkWidget *level_row, *level_combo;     /* Qualitätsstufe der Umwandlung */
 } UiState;
 
 static UiState ui;
@@ -349,15 +376,20 @@ static UiState ui;
 static void rebuild_results(void);
 static void rebuild_tree(ResultTree *tree);
 static void rebuild_preview(void);
+static int compare_newest(gconstpointer a, gconstpointer b);
+static void update_language_choices(void);
 static void start_news_load(void);
 static void show_news_busy(bool busy);
 static void update_tiles(void);
 static void update_genres(void);
-static void rebuild_library(void);
 static void rebuild_videos(bool force);
 static void play_path(const char *path);
 static void on_video_tile_activated(GtkFlowBox *box, GtkFlowBoxChild *child, gpointer d);
 static void update_selection(void);
+static const WatchState *watch_get(const char *path);
+static bool watch_done(const WatchState *w);
+static bool watch_started(const WatchState *w);
+static int watch_percent(const WatchState *w);
 
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
@@ -588,8 +620,35 @@ static void show_info_bar(GtkMessageType type, const char *text)
         gtk_info_bar_set_revealed(GTK_INFO_BAR(ui.infobar), FALSE);
         return;
     }
-    gtk_info_bar_set_message_type(GTK_INFO_BAR(ui.infobar), type);
-    set_label_text(ui.info_label, text);
+    /* steht schon eine Meldung da, bleibt sie unter der neuen stehen (höchstens INFO_LINES_MAX);
+     * die Farbe richtet sich nach der ernstesten */
+    static GPtrArray *lines;
+    static GtkMessageType shown_type;
+    if (!lines) lines = g_ptr_array_new_with_free_func(g_free);
+    if (!gtk_info_bar_get_revealed(GTK_INFO_BAR(ui.infobar)) ||
+        !gtk_widget_get_visible(ui.infobar)) {
+        g_ptr_array_set_size(lines, 0);
+        shown_type = type;
+    }
+    for (guint i = 0; i < lines->len; i++)
+        if (!strcmp(lines->pdata[i], text)) g_ptr_array_remove_index(lines, i--);
+    g_ptr_array_insert(lines, 0, g_strdup(text));
+    if (lines->len > INFO_LINES_MAX) g_ptr_array_set_size(lines, INFO_LINES_MAX);
+    static const GtkMessageType RANK[] = {GTK_MESSAGE_OTHER, GTK_MESSAGE_INFO,
+                                          GTK_MESSAGE_QUESTION, GTK_MESSAGE_WARNING,
+                                          GTK_MESSAGE_ERROR};
+    int old_rank = 0, new_rank = 0;
+    for (size_t i = 0; i < G_N_ELEMENTS(RANK); i++) {
+        if (RANK[i] == shown_type) old_rank = (int)i;
+        if (RANK[i] == type) new_rank = (int)i;
+    }
+    if (new_rank > old_rank) shown_type = type;
+    g_ptr_array_add(lines, NULL);
+    char *joined = g_strjoinv("\n", (char **)lines->pdata);
+    g_ptr_array_remove_index(lines, lines->len - 1);
+    gtk_info_bar_set_message_type(GTK_INFO_BAR(ui.infobar), shown_type);
+    set_label_text(ui.info_label, joined);
+    g_free(joined);
     gtk_widget_show(ui.infobar);
     gtk_info_bar_set_revealed(GTK_INFO_BAR(ui.infobar), TRUE);
 }
@@ -769,18 +828,20 @@ static void settings_load(void)
         g_free(c->dir);
         c->dir = g_build_filename(videos ? videos : g_get_home_dir(), "Mediathek", NULL);
     }
-    c->cache_dir = g_key_file_get_string(file, SETTINGS_GROUP, "Cacheordner", NULL);
-    char *old_dir = g_build_filename(g_get_home_dir(), ".zdf-downloader", NULL);
-    if (c->cache_dir && g_str_has_prefix(c->cache_dir, old_dir)) {   /* umgezogen, siehe md_init */
-        char *moved = g_strconcat(md_app_dir(), c->cache_dir + strlen(old_dir), NULL);
-        g_free(c->cache_dir);
-        c->cache_dir = moved;
+    /* Bis 2.2 gab es einen eigenen Ordner für den Zwischenspeicher. War einer gewählt, wird er
+     * zum Ordner für alle Programmdaten; der Zwischenspeicher zieht dort in den Unterordner. */
+    char *cache_dir = g_key_file_get_string(file, SETTINGS_GROUP, "Cacheordner", NULL);
+    if (cache_dir && *cache_dir && !g_str_has_suffix(cache_dir, G_DIR_SEPARATOR_S "bilder")) {
+        char *error = NULL;
+        if (md_set_data_parent(cache_dir, &error)) md_adopt_cache(cache_dir);
+        else md_log("Datenordner nicht umgezogen: %s", error);
+        g_free(error);
+        g_key_file_remove_key(file, SETTINGS_GROUP, "Cacheordner", NULL);
+        path = settings_path();                     /* liegt jetzt im neuen Datenordner */
+        g_key_file_save_to_file(file, path, NULL);
+        g_free(path);
     }
-    g_free(old_dir);
-    if (!c->cache_dir || !*c->cache_dir) {
-        g_free(c->cache_dir);
-        c->cache_dir = md_default_cover_dir();
-    }
+    g_free(cache_dir);
     c->quality = settings_int(file, "Qualitaet", MD_QUALITY_HIGH, 0, 2);
     c->encoder = settings_int(file, "Encoder", MD_ENCODER_GPU, 0, 1);
     c->gpu_quality = settings_int(file, "GpuQualitaet", MD_DEFAULT_GPU_QUALITY, 1, 255);
@@ -817,7 +878,6 @@ static void settings_save(void)
     const Config *c = &ui.cfg;
     GKeyFile *file = g_key_file_new();
     g_key_file_set_string(file, SETTINGS_GROUP, "Speicherort", c->dir);
-    g_key_file_set_string(file, SETTINGS_GROUP, "Cacheordner", c->cache_dir);
     g_key_file_set_integer(file, SETTINGS_GROUP, "Qualitaet", c->quality);
     g_key_file_set_integer(file, SETTINGS_GROUP, "Encoder", c->encoder);
     g_key_file_set_integer(file, SETTINGS_GROUP, "GpuQualitaet", c->gpu_quality);
@@ -851,7 +911,6 @@ static void apply_queue_settings(void)
 {
     md_set_rate_limit(ui.cfg.limit_on ? (gint64)(ui.cfg.limit_mb * 1e6) : 0);
     md_set_parallel(ui.cfg.parallel, ui.cfg.conversions);
-    md_set_cover_dir(ui.cfg.cache_dir);
     md_set_encoder((MdEncoder)ui.cfg.encoder, ui.cfg.gpu_quality, ui.cfg.cpu_rf);
     md_queue_hold(ui.cfg.hold_downloads, ui.cfg.hold_conversions);
 }
@@ -887,6 +946,7 @@ static void group_free(gpointer data)
     g_strfreev(group->genres);
     g_strfreev(group->imdb_genres);
     g_free(group->fsk);
+    g_free(group->found_by);
     g_clear_object(&group->cover);
     g_ptr_array_free(group->seasons, TRUE);
     g_free(group);
@@ -1063,6 +1123,23 @@ static GtkWidget *status_badge(MdStatus status)
     }
 }
 
+/* Marke zum Sehstand einer geladenen Datei; NULL = noch nicht angefangen */
+static GtkWidget *watch_badge(const char *path)
+{
+    const WatchState *w = ui.watch ? watch_get(path) : NULL;
+    if (watch_done(w)) return new_badge("✓ Gesehen", "ok");
+    if (!watch_started(w) || w->duration <= 0) return NULL;
+    char *text = g_strdup_printf("%d %% gesehen", watch_percent(w));
+    GtkWidget *badge = new_badge(text, "ok");
+    char *rest = md_format_time(w->duration - w->position);
+    char *tip = g_strdup_printf("Geladen · noch %s", rest);
+    gtk_widget_set_tooltip_text(badge, tip);
+    g_free(rest);
+    g_free(tip);
+    g_free(text);
+    return badge;
+}
+
 /* Marke zum Stand einer Staffel oder Serie */
 static GtkWidget *counts_badge(const Counts *c)
 {
@@ -1212,7 +1289,9 @@ static void add_item_row(ResultTree *tree, Item *item, int depth)
     ref->kind = ROW_ITEM;
     ref->data = item;
     GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    GtkWidget *badge = status_badge(item->status);
+    GtkWidget *badge = item->status == MD_STATUS_DONE && item->path ? watch_badge(item->path)
+                                                                    : NULL;
+    if (!badge) badge = status_badge(item->status);
     if (badge) {
         gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
         gtk_box_pack_start(GTK_BOX(suffix), badge, FALSE, FALSE, 0);
@@ -1850,12 +1929,14 @@ static gboolean on_imdb_genres_done(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static gboolean on_video_genres_done(gpointer data);
+
 static void imdb_genres_worker(gpointer data, gpointer d)
 {
     (void)d;
     GenreJob *job = data;
     job->genres = md_imdb_genres(job->name, job->is_film);
-    g_idle_add(on_imdb_genres_done, job);
+    g_idle_add(job->videos ? on_video_genres_done : on_imdb_genres_done, job);
 }
 
 static void request_cover(Group *group)
@@ -1877,6 +1958,13 @@ static void request_cover(Group *group)
     g_thread_pool_push(ui.cover_pool, job, NULL);
 }
 
+/* "Meine Videos" vor der Vorschau: das sind wenige, die Vorschau fragt Hunderte an */
+static gint compare_genre_jobs(gconstpointer a, gconstpointer b, gpointer d)
+{
+    (void)d;
+    return (int)((const GenreJob *)b)->videos - (int)((const GenreJob *)a)->videos;
+}
+
 /* sichtbare Kacheln zuerst */
 static gint compare_cover_jobs(gconstpointer a, gconstpointer b, gpointer d)
 {
@@ -1884,25 +1972,28 @@ static gint compare_cover_jobs(gconstpointer a, gconstpointer b, gpointer d)
     return (int)((const CoverJob *)a)->background - (int)((const CoverJob *)b)->background;
 }
 
-/* Kategorien aller Titel im Hintergrund ermitteln */
+/* Kategorien eines Titels im Hintergrund ermitteln */
+static void request_group_genres(const Group *group)
+{
+    GenreJob *imdb = g_new0(GenreJob, 1);
+    imdb->key = g_strdup(group->key);
+    imdb->name = g_strdup(group->name);
+    imdb->is_film = group->is_film;
+    ui.genre_pending++;
+    g_thread_pool_push(ui.imdb_pool, imdb, NULL);
+    ui.genres_dirty = true;
+    if (group->genres || !group->website) return;
+    CoverJob *job = g_new0(CoverJob, 1);
+    job->key = g_strdup(group->key);
+    job->website = g_strdup(group->website);
+    job->background = true;
+    ui.genre_pending++;
+    g_thread_pool_push(ui.cover_pool, job, NULL);
+}
+
 static void request_all_genres(void)
 {
-    for (guint i = 0; i < ui.preview->len; i++) {
-        const Group *group = ui.preview->pdata[i];
-        GenreJob *imdb = g_new0(GenreJob, 1);
-        imdb->key = g_strdup(group->key);
-        imdb->name = g_strdup(group->name);
-        imdb->is_film = group->is_film;
-        ui.genre_pending++;
-        g_thread_pool_push(ui.imdb_pool, imdb, NULL);
-        if (group->genres || !group->website) continue;
-        CoverJob *job = g_new0(CoverJob, 1);
-        job->key = g_strdup(group->key);
-        job->website = g_strdup(group->website);
-        job->background = true;
-        ui.genre_pending++;
-        g_thread_pool_push(ui.cover_pool, job, NULL);
-    }
+    for (guint i = 0; i < ui.preview->len; i++) request_group_genres(ui.preview->pdata[i]);
     ui.genres_dirty = true;
 }
 
@@ -2038,7 +2129,9 @@ static void update_tile(const Group *group)
     GtkWidget *badge = NULL;
     if (group->is_film && c.total == 1) {
         const Season *season = group->seasons->pdata[0];
-        badge = status_badge(((Item *)season->items->pdata[0])->status);
+        const Item *item = season->items->pdata[0];
+        if (item->status == MD_STATUS_DONE && item->path) badge = watch_badge(item->path);
+        if (!badge) badge = status_badge(item->status);
     } else if (c.selected) {
         char *text = g_strdup_printf("%d gewählt", c.selected);
         badge = new_badge(text, NULL);
@@ -2440,6 +2533,117 @@ static bool group_has_genre(const Group *group, const char *genre)
 }
 
 /* Passt eine Kachel zu den Filtern oben? filter ist kleingeschrieben. */
+/* Zeile unter dem Filterfeld: sagt, dass Enter alle Mediatheken durchsucht, und was es fand */
+static void update_search_hint(const char *filter, int shown)
+{
+    char *text = NULL;
+    if (ui.searching)
+        text = g_strdup_printf("Suche „%s“ in allen Mediatheken …", ui.searching);
+    else if (*filter && !g_strcmp0(filter, ui.searched))
+        text = g_strdup(ui.search_result);
+    else if (*filter && shown == 0)
+        text = g_strdup("Nichts in der Vorschau, sie zeigt nur die neuesten Titel. Enter sucht "
+                        "in allen Mediatheken.");
+    else if (*filter)
+        text = g_strdup("Enter sucht auch in allen Mediatheken, nicht nur unter den neuesten "
+                        "Titeln.");
+    set_label_text(ui.search_hint, text ? text : "");
+    gtk_widget_set_visible(ui.search_hint, text != NULL);
+    g_free(text);
+}
+
+static gboolean on_search_done(gpointer data)
+{
+    SearchJob *job = data;
+    g_clear_pointer(&ui.searching, g_free);
+    if (!ui.preview_busy) {
+        gtk_spinner_stop(GTK_SPINNER(ui.preview_spinner));
+        gtk_widget_hide(ui.preview_spinner);
+    }
+    char *lower = g_utf8_strdown(job->text, -1);
+    g_free(ui.searched);
+    ui.searched = lower;
+    g_clear_pointer(&ui.search_result, g_free);
+    if (job->items && ui.preview && !ui.preview_busy) {
+        close_hover();
+        GPtrArray *groups = group_items(job->items);
+        g_ptr_array_set_free_func(job->items, NULL);        /* gehören jetzt den Staffeln */
+        g_ptr_array_free(job->items, TRUE);
+        guint found = groups->len;
+        for (guint i = 0; i < groups->len; i++) {
+            Group *group = groups->pdata[i];
+            Group *known = g_hash_table_lookup(ui.preview_index, group->key);
+            if (known) {
+                /* schon in der Vorschau: die dortige Gruppe gilt, sie hat schon Bild und Daten */
+                if (!known->found_by) known->found_by = g_strdup(lower);
+                group_free(group);
+                continue;
+            }
+            group->complete = group->is_film;
+            group->found_by = g_strdup(lower);
+            g_ptr_array_add(ui.preview, group);
+            g_hash_table_insert(ui.preview_index, group->key, group);
+            request_group_genres(group);
+        }
+        g_ptr_array_set_free_func(groups, NULL);
+        g_ptr_array_free(groups, TRUE);
+        ui.search_result =
+            found == 0 ? g_strdup_printf("„%s“ ist in keiner Mediathek zu finden.", job->text)
+            : g_strdup_printf("%u Titel aus allen Mediatheken für „%s“%s.", found, job->text,
+                              job->truncated ? ", nur die ersten Treffer – genauer suchen hilft"
+                                             : "");
+        g_ptr_array_sort(ui.preview, compare_newest);
+        update_language_choices();
+        ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
+    } else {
+        if (job->items) g_ptr_array_free(job->items, TRUE);
+        ui.search_result = g_strdup(job->error ? job->error
+                                    : "Die Suche ging nicht, bitte gleich noch einmal.");
+    }
+    rebuild_preview();
+    g_free(job->text);
+    g_free(job->dir);
+    g_free(job->error);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer search_thread(gpointer data)
+{
+    SearchJob *job = data;
+    MdQuery query = {.text = job->text, .kind = MD_KIND_ALL, .sources = MD_SOURCE_ALL,
+                     .min_minutes = job->min_minutes, .hide_variants = job->hide_variants,
+                     .cache = MD_CACHE_USE};
+    GPtrArray *titles = md_search(&query, NULL, &job->truncated, &job->error);
+    if (titles) {
+        job->items = g_ptr_array_new_with_free_func(item_free);
+        add_items(job->items, titles, job->dir);
+    }
+    g_idle_add(on_search_done, job);
+    return NULL;
+}
+
+/* Enter im Filterfeld: alle Mediatheken fragen und die Treffer in die Vorschau aufnehmen */
+static void on_preview_search_activate(GtkEntry *entry, gpointer d)
+{
+    (void)d;
+    char *text = g_strstrip(g_strdup(gtk_entry_get_text(entry)));
+    if (!*text || ui.searching || ui.preview_busy || !ui.preview) {
+        g_free(text);
+        return;
+    }
+    ui.searching = g_strdup(text);
+    SearchJob *job = g_new0(SearchJob, 1);
+    job->text = text;
+    job->dir = g_strdup(ui.cfg.dir);
+    job->min_minutes = ui.cfg.min_minutes;
+    job->hide_variants = !ui.cfg.show_signed;
+    gtk_widget_show(ui.preview_spinner);
+    gtk_spinner_start(GTK_SPINNER(ui.preview_spinner));
+    rebuild_preview();
+    g_thread_unref(g_thread_new("suche", search_thread, job));
+}
+
 static bool tile_matches(const Group *group, const char *filter)
 {
     int kind = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.preview_kind));
@@ -2452,6 +2656,8 @@ static bool tile_matches(const Group *group, const char *filter)
                   group_has_language(group, language);
     g_free(language);
     if (!speaks) return false;
+    /* die Suche findet auch über die Beschreibung; solche Treffer bleiben bei ihrem Begriff */
+    if (*filter && !g_strcmp0(group->found_by, filter)) return true;
     char *lower = g_utf8_strdown(group->name, -1);
     bool match = strstr(lower, filter) != NULL;
     g_free(lower);
@@ -2473,7 +2679,8 @@ static void rebuild_preview(void)
         for (GList *l = children; l; l = l->next) gtk_widget_destroy(l->data);
         g_list_free(children);
     }
-    char *filter = g_utf8_strdown(gtk_entry_get_text(GTK_ENTRY(ui.preview_search)), -1);
+    char *filter = g_strstrip(g_utf8_strdown(gtk_entry_get_text(GTK_ENTRY(ui.preview_search)),
+                                             -1));
     int films = 0, series = 0;
     for (guint i = 0; ui.preview && i < ui.preview->len; i++) {
         Group *group = ui.preview->pdata[i];
@@ -2483,6 +2690,7 @@ static void rebuild_preview(void)
             add_tile(group->is_film ? ui.film_box : ui.series_box, group);
         (*count)++;
     }
+    update_search_hint(filter, films + series);
     g_free(filter);
     char *text = g_strdup_printf("Filme (%d)", films);
     set_label_text(ui.film_title, text);
@@ -2680,6 +2888,7 @@ static gboolean on_preview_done(gpointer data)
         if (ui.preview_index) g_hash_table_destroy(ui.preview_index);
         if (ui.preview) g_ptr_array_free(ui.preview, TRUE);
         ui.preview = group_items(job->items);
+        g_clear_pointer(&ui.searched, g_free);      /* ihre Treffer sind mit der alten Liste weg */
         update_language_choices();
         g_ptr_array_set_free_func(job->items, NULL);        /* gehören jetzt den Staffeln */
         g_ptr_array_sort(ui.preview, compare_newest);
@@ -2694,7 +2903,6 @@ static gboolean on_preview_done(gpointer data)
         rebuild_preview();
         g_ptr_array_free(job->items, TRUE);
         request_all_genres();
-        rebuild_library();
         rebuild_videos(true);           /* Titelbilder der Mediathek */
         start_news_load();
     } else {
@@ -2791,9 +2999,11 @@ static GtkWidget *build_preview_page(void)
     gtk_widget_set_margin_bottom(top, 4);
     GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     ui.preview_search = gtk_search_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(ui.preview_search), "In der Vorschau filtern …");
+    gtk_entry_set_placeholder_text(GTK_ENTRY(ui.preview_search),
+                                   "Filtern – Enter sucht in allen Mediatheken (Strg+F)");
     g_signal_connect(ui.preview_search, "search-changed", G_CALLBACK(on_preview_filter_changed),
                      NULL);
+    g_signal_connect(ui.preview_search, "activate", G_CALLBACK(on_preview_search_activate), NULL);
     gtk_box_pack_start(GTK_BOX(bar), ui.preview_search, TRUE, TRUE, 0);
     ui.preview_kind = new_combo(KIND_TEXT, 3, MD_KIND_ALL);
     g_signal_connect(ui.preview_kind, "changed", G_CALLBACK(on_preview_filter_changed), NULL);
@@ -2828,6 +3038,10 @@ static GtkWidget *build_preview_page(void)
     add_css_class(ui.preview_note, "dim-label");
     set_wrapping(ui.preview_note, 90);
     gtk_box_pack_start(GTK_BOX(top), ui.preview_note, FALSE, FALSE, 0);
+    ui.search_hint = new_label("", "zd-sub");
+    set_wrapping(ui.search_hint, 90);
+    gtk_widget_set_no_show_all(ui.search_hint, TRUE);
+    gtk_box_pack_start(GTK_BOX(top), ui.search_hint, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), top, FALSE, FALSE, 0);
 
     GtkWidget *scrolled, *column = new_page_column(&scrolled);
@@ -3065,7 +3279,16 @@ static GtkWidget *build_news_page(void)
     GtkWidget *top = new_column();
     gtk_widget_set_margin_top(top, 14);
     gtk_widget_set_margin_bottom(top, 8);
+    /* der Reitername allein verwechselt sich leicht mit der Warteschlange */
+    gtk_box_pack_start(GTK_BOX(top), new_label("Neue Folgen deiner Serien", "zd-hero"), FALSE,
+                       FALSE, 0);
+    GtkWidget *lead = new_label("Was bei Serien, von denen du schon etwas geladen hast, seitdem "
+                                "gesendet wurde.", "zd-lead");
+    add_css_class(lead, "dim-label");
+    set_wrapping(lead, 90);
+    gtk_box_pack_start(GTK_BOX(top), lead, FALSE, FALSE, 0);
     GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_top(bar, 10);
     ui.news_note = new_label("Die Suche beginnt, sobald die Startliste geladen ist.", "zd-sub");
     add_css_class(ui.news_note, "dim-label");
     set_wrapping(ui.news_note, 60);
@@ -3143,6 +3366,18 @@ static void on_job_remove_clicked(GtkButton *b, gpointer d)
         !ask_confirmation("Download abbrechen?", "Der bisher geladene Teil wird gelöscht.",
                           "Behalten", "Abbrechen und löschen", true))
         return;
+    /* ein Fehlschlag mit Resten fragt auch, sonst sind sie ohne Warnung weg */
+    gint64 bytes = g_object_get_data(G_OBJECT(row->row), "open") ? 0
+                                                                  : md_job_partial_bytes(row->id);
+    if (bytes > 0) {
+        char *size = md_format_size(bytes);
+        char *text = g_strdup_printf("Die halbfertigen Dateien (%s) werden gelöscht.", size);
+        bool yes = ask_confirmation("Aus der Liste entfernen?", text, "Behalten", "Entfernen",
+                                    true);
+        g_free(size);
+        g_free(text);
+        if (!yes) return;
+    }
     md_job_remove(row->id);
 }
 
@@ -3269,7 +3504,7 @@ static void job_row_update(JobRow *row, const MdJobView *j)
     gtk_widget_set_visible(row->retry, failed);
     gtk_widget_set_visible(row->open, done);
     gtk_widget_set_visible(row->remove, true);
-    gtk_widget_set_tooltip_text(row->remove, open ? "Abbrechen" : "Aus der Liste entfernen");
+    gtk_widget_set_tooltip_text(row->remove, open ? "Download abbrechen" : "Aus der Liste entfernen");
     gtk_widget_set_tooltip_text(row->pause, j->paused ? "Fortsetzen" : "Pausieren");
     gtk_button_set_image(GTK_BUTTON(row->pause),
                          gtk_image_new_from_icon_name(j->paused ? "media-playback-start-symbolic"
@@ -3343,7 +3578,8 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
     g_string_free(sub, TRUE);
     gtk_widget_set_sensitive(ui.clear_failed, failed > 0);
 
-    char *page = open ? g_strdup_printf("Downloads (%d)", open) : g_strdup("Downloads"), *old;
+    char *page = open ? g_strdup_printf("Warteschlange (%d)", open)
+                      : g_strdup("Warteschlange"), *old;
     gtk_container_child_get(GTK_CONTAINER(ui.stack), ui.downloads_page, "title", &old, NULL);
     if (g_strcmp0(old, page))
         gtk_container_child_set(GTK_CONTAINER(ui.stack), ui.downloads_page, "title", page, NULL);
@@ -3488,7 +3724,6 @@ static gboolean on_tick(gpointer d)
     md_queue_snapshot_free(jobs, count);
     if (first || g_hash_table_size(keys)) {
         refresh_statuses(first ? NULL : keys);
-        rebuild_library();
         rebuild_videos(false);
     }
     g_hash_table_destroy(keys);
@@ -3534,6 +3769,19 @@ static void on_clear_failed_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     (void)d;
+    int count = 0;
+    gint64 bytes = md_queue_failed_bytes(&count);
+    if (count == 0) return;
+    char *title = count == 1 ? g_strdup("Einen Fehlschlag entfernen?")
+                             : g_strdup_printf("%d Fehlschläge entfernen?", count);
+    char *size = md_format_size(bytes);
+    char *text = bytes > 0 ? g_strdup_printf("Die halbfertigen Dateien (%s) werden gelöscht.", size)
+                           : g_strdup("Es liegen keine halbfertigen Dateien vor.");
+    bool yes = ask_confirmation(title, text, "Behalten", "Entfernen", bytes > 0);
+    g_free(title);
+    g_free(size);
+    g_free(text);
+    if (!yes) return;
     md_queue_remove_failed();
     on_tick(NULL);
 }
@@ -3572,7 +3820,8 @@ static GtkWidget *build_downloads_page(void)
     GtkWidget *resume = gtk_button_new_with_label("Alle fortsetzen");
     GtkWidget *clear = gtk_button_new_with_label("Fertige entfernen");
     ui.clear_failed = gtk_button_new_with_label("Fehlgeschlagene entfernen");
-    gtk_widget_set_tooltip_text(ui.clear_failed, "Löscht auch die halbfertigen Dateien");
+    gtk_widget_set_tooltip_text(ui.clear_failed,
+                                "Löscht nach Rückfrage auch die halbfertigen Dateien");
     g_signal_connect(pause, "clicked", G_CALLBACK(on_pause_all_clicked), NULL);
     g_signal_connect(resume, "clicked", G_CALLBACK(on_resume_all_clicked), NULL);
     g_signal_connect(clear, "clicked", G_CALLBACK(on_clear_done_clicked), NULL);
@@ -3629,199 +3878,6 @@ static GtkWidget *build_downloads_page(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Seite Bibliothek
- * ------------------------------------------------------------------------- */
-/* Verlaufseintrag entfernen, wenn die Datei weg ist */
-static void on_forget_clicked(GtkButton *b, gpointer d)
-{
-    (void)d;
-    md_history_forget(g_object_get_data(G_OBJECT(b), "path"));
-    refresh_statuses(NULL);
-    rebuild_library();
-    rebuild_videos(false);
-}
-
-/* Serie in der Vorschau zeigen */
-static void on_find_missing_clicked(GtkButton *b, gpointer d)
-{
-    (void)d;
-    gtk_entry_set_text(GTK_ENTRY(ui.preview_search), g_object_get_data(G_OBJECT(b), "path"));
-    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.preview_kind), MD_KIND_ALL);
-    gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "vorschau");
-}
-
-static void on_library_row_activated(GtkListBox *list, GtkListBoxRow *row, gpointer d)
-{
-    (void)list;
-    (void)d;
-    const char *topic = g_object_get_data(G_OBJECT(row), "topic");
-    if (!topic) return;
-    if (!g_hash_table_remove(ui.library_open, topic))
-        g_hash_table_add(ui.library_open, g_strdup(topic));
-    rebuild_library();
-}
-
-/* Überschrift einer Sendung */
-static void add_library_topic(const char *topic, int count, int missing, gint64 bytes)
-{
-    bool expanded = g_hash_table_contains(ui.library_open, topic);
-    GtkWidget *arrow = gtk_image_new_from_icon_name(expanded ? "pan-down-symbolic"
-                                                             : "pan-end-symbolic",
-                                                    GTK_ICON_SIZE_MENU);
-    char *size = md_format_size((double)bytes);
-    char *subtitle = g_strdup_printf("%d %s · %s", count, plural(count, "Titel", "Titel"), size);
-    GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    if (missing) {
-        char *text = g_strdup_printf("%d %s", missing,
-                                     plural(missing, "Datei fehlt", "Dateien fehlen"));
-        GtkWidget *badge = new_badge(text, "err");
-        gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(suffix), badge, FALSE, FALSE, 0);
-        g_free(text);
-    }
-    char *lower = g_utf8_strdown(topic, -1);
-    char *key = g_strdup_printf("S:%s", lower);
-    const Group *series = ui.preview_index ? g_hash_table_lookup(ui.preview_index, key) : NULL;
-    if (series && series->has_news) {
-        GtkWidget *news = new_news_badge();
-        gtk_widget_set_valign(news, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(suffix), news, FALSE, FALSE, 0);
-    }
-    g_free(lower);
-    g_free(key);
-    if (strcmp(topic, "Filme"))
-        gtk_box_pack_start(GTK_BOX(suffix),
-                           new_path_button("edit-find-symbolic", "In der Vorschau zeigen", topic,
-                                           G_CALLBACK(on_find_missing_clicked)), FALSE, FALSE, 0);
-    GtkWidget *row = add_row(ui.library_list, topic, subtitle, arrow, suffix, NULL);
-    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
-    g_object_set_data_full(G_OBJECT(row), "topic", g_strdup(topic), g_free);
-    g_free(size);
-    g_free(subtitle);
-}
-
-/* Zeile eines geladenen Titels */
-static void add_library_entry(const MdHistoryEntry *e)
-{
-    GtkWidget *suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    if (e->exists) {
-        gtk_box_pack_start(GTK_BOX(suffix),
-                           new_path_button("media-playback-start-symbolic", "Abspielen", e->path,
-                                           G_CALLBACK(on_open_file_clicked)), FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(suffix),
-                           new_path_button("folder-open-symbolic", "Ordner öffnen", e->path,
-                                           G_CALLBACK(on_open_folder_clicked)), FALSE, FALSE, 0);
-    } else {
-        GtkWidget *badge = new_badge("Datei fehlt", "err");
-        gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
-        gtk_box_pack_start(GTK_BOX(suffix), badge, FALSE, FALSE, 0);
-        gtk_box_pack_start(GTK_BOX(suffix),
-                           new_path_button("edit-clear-symbolic", "Aus dem Verlauf entfernen",
-                                           e->path, G_CALLBACK(on_forget_clicked)),
-                           FALSE, FALSE, 0);
-    }
-    char *date = format_date(e->finished), *size = md_format_size((double)e->size);
-    char *subtitle = g_strdup_printf("%s · geladen am %s", size, date);
-    GtkWidget *row = add_row(ui.library_list, e->title, subtitle, NULL, suffix, NULL);
-    gtk_widget_set_margin_start(gtk_bin_get_child(GTK_BIN(row)), 40);
-    gtk_widget_set_tooltip_text(row, e->path);
-    g_free(date);
-    g_free(size);
-    g_free(subtitle);
-}
-
-/* Trifft der Filter der Bibliothek auf diesen Eintrag zu? */
-static bool library_matches(const MdHistoryEntry *e, const char *filter)
-{
-    if (!*filter) return true;
-    char *text = g_strconcat(e->topic, " ", e->title, NULL), *lower = g_utf8_strdown(text, -1);
-    bool match = strstr(lower, filter) != NULL;
-    g_free(text);
-    g_free(lower);
-    return match;
-}
-
-/* Bibliothek aus dem Verlauf neu aufbauen */
-static void rebuild_library(void)
-{
-    GList *children = gtk_container_get_children(GTK_CONTAINER(ui.library_list));
-    for (GList *l = children; l; l = l->next) gtk_widget_destroy(l->data);
-    g_list_free(children);
-
-    int count = 0, shown = 0, gone = 0;
-    gint64 total = 0;
-    MdHistoryEntry *entries = md_history_snapshot(&count);
-    char *filter = g_utf8_strdown(gtk_entry_get_text(GTK_ENTRY(ui.library_search)), -1);
-    for (int i = 0; i < count; ) {
-        int end = i, matches = 0, missing = 0;
-        gint64 bytes = 0;
-        while (end < count && !strcmp(entries[end].topic, entries[i].topic)) {
-            bool match = library_matches(&entries[end], filter);
-            matches += match;
-            missing += match && !entries[end].exists;
-            bytes += match && entries[end].exists ? entries[end].size : 0;
-            end++;
-        }
-        if (matches) add_library_topic(entries[i].topic, matches, missing, bytes);
-        bool expanded = *filter || g_hash_table_contains(ui.library_open, entries[i].topic);
-        for (int n = i; n < end && expanded; n++)
-            if (library_matches(&entries[n], filter)) add_library_entry(&entries[n]);
-        shown += matches;
-        gone += missing;
-        total += bytes;
-        i = end;
-    }
-    if (!shown) {
-        GtkWidget *label = new_label(count ? "Nichts gefunden." : "Noch nichts geladen.",
-                                     "dim-label");
-        gtk_label_set_xalign(GTK_LABEL(label), 0.5);
-        gtk_widget_set_margin_top(label, 16);
-        gtk_widget_set_margin_bottom(label, 16);
-        gtk_container_add(GTK_CONTAINER(ui.library_list), label);
-    }
-    char *size = md_format_size((double)total);
-    char *hero = g_strdup_printf("%d %s geladen", shown, plural(shown, "Titel", "Titel"));
-    char *sub = gone ? g_strdup_printf("%s · bei %d %s fehlt die Datei", size, gone,
-                                       plural(gone, "Titel", "Titeln"))
-                     : g_strdup_printf("%s auf dem Laufwerk", size);
-    set_label_text(ui.library_hero, hero);
-    set_label_text(ui.library_sub, sub);
-    g_free(size);
-    g_free(hero);
-    g_free(sub);
-    g_free(filter);
-    md_history_snapshot_free(entries, count);
-    gtk_widget_show_all(ui.library_list);
-}
-
-static void on_library_search_changed(GtkSearchEntry *e, gpointer d)
-{
-    (void)e;
-    (void)d;
-    rebuild_library();
-}
-
-static GtkWidget *build_library_page(void)
-{
-    GtkWidget *scrolled, *page = new_page_column(&scrolled);
-    ui.library_hero = new_label("", "zd-hero");
-    ui.library_sub = new_label("", "zd-lead");
-    add_css_class(ui.library_sub, "dim-label");
-    gtk_box_pack_start(GTK_BOX(page), ui.library_hero, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(page), ui.library_sub, FALSE, FALSE, 0);
-    ui.library_search = gtk_search_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(ui.library_search), "In der Bibliothek suchen …");
-    gtk_widget_set_margin_top(ui.library_search, 10);
-    g_signal_connect(ui.library_search, "search-changed", G_CALLBACK(on_library_search_changed),
-                     NULL);
-    gtk_box_pack_start(GTK_BOX(page), ui.library_search, FALSE, FALSE, 0);
-    ui.library_list = add_group(page, "Nach Sendung");
-    g_signal_connect(ui.library_list, "row-activated", G_CALLBACK(on_library_row_activated), NULL);
-    ui.library_open = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    return scrolled;
-}
-
-/* ---------------------------------------------------------------------------
  * Seite Meine Videos
  *
  * Alles Geladene als Kacheln wie in einer Mediathek: oben "Weiterschauen" und "Zuletzt
@@ -3838,6 +3894,14 @@ static bool watch_done(const WatchState *w)
 static bool watch_started(const WatchState *w)
 {
     return w && w->position >= RESUME_MIN_SECONDS && !watch_done(w);
+}
+
+/* gesehener Anteil in Prozent, für angefangene Dateien 1 bis 99 */
+static int watch_percent(const WatchState *w)
+{
+    if (watch_done(w)) return 100;
+    if (!watch_started(w) || w->duration <= 0) return 0;
+    return CLAMP((int)(w->position * 100 / w->duration), 1, 99);
 }
 
 static char *watch_path(void)
@@ -3907,9 +3971,21 @@ static void watch_set(const char *path, double position, double duration)
     w->updated = g_get_real_time() / G_USEC_PER_SEC;
 }
 
+/* Stand von path; nach der Umwandlung einer MP4- in eine MKV-Datei zieht er zum neuen Namen mit */
 static const WatchState *watch_get(const char *path)
 {
-    return g_hash_table_lookup(ui.watch, path);
+    WatchState *w = g_hash_table_lookup(ui.watch, path);
+    if (w || !g_str_has_suffix(path, ".mkv")) return w;
+    char *stem = g_strndup(path, strlen(path) - strlen(".mkv"));
+    char *mp4 = g_strconcat(stem, ".mp4", NULL);
+    gpointer old_key = NULL;
+    if (g_hash_table_steal_extended(ui.watch, mp4, &old_key, (gpointer *)&w)) {
+        g_free(old_key);
+        g_hash_table_insert(ui.watch, g_strdup(path), w);
+    }
+    g_free(stem);
+    g_free(mp4);
+    return w;
 }
 
 /* Bezeichnung einer Folge ohne den Namen der Sendung und "S01E03" */
@@ -4294,6 +4370,31 @@ static void on_menu_trash(GtkMenuItem *item, gpointer d)
     rebuild_videos(true);
 }
 
+/* Geladene Dateien nachträglich nach AV1 umwandeln, mit Encoder und Qualität aus den
+ * Einstellungen */
+static void on_menu_convert(GtkMenuItem *item, gpointer d)
+{
+    (void)d;
+    char **paths = g_object_get_data(G_OBJECT(item), "paths");
+    MdJobOptions options = {.dir = ui.cfg.dir, .quality = (MdQuality)ui.cfg.quality,
+                            .convert = true, .encoder = (MdEncoder)ui.cfg.encoder,
+                            .gpu_quality = ui.cfg.gpu_quality, .cpu_rf = ui.cfg.cpu_rf,
+                            .keep_original = ui.cfg.keep_original};
+    int added = 0, skipped = 0;
+    for (char **path = paths; *path; path++) {
+        if (md_queue_convert(*path, &options)) added++;
+        else skipped++;
+    }
+    if (skipped) {
+        char *text = g_strdup_printf("%d %s schon in Arbeit und %s übersprungen.", skipped,
+                                     plural(skipped, "Datei ist", "Dateien sind"),
+                                     plural(skipped, "wurde", "wurden"));
+        show_info_bar(GTK_MESSAGE_INFO, text);
+        g_free(text);
+    }
+    if (added) gtk_stack_set_visible_child(GTK_STACK(ui.stack), ui.downloads_page);
+}
+
 static gboolean destroy_widget(gpointer widget)
 {
     gtk_widget_destroy(widget);
@@ -4336,6 +4437,14 @@ static gboolean on_tile_press(GtkWidget *w, GdkEventButton *e, gpointer d)
                       paths[0]);
         add_menu_item(menu, "Ordner öffnen", G_CALLBACK(on_menu_open_folder), paths[0]);
     }
+    GtkWidget *convert = add_menu_item(menu, single ? "Nach AV1 umwandeln"
+                                       : "Alle Folgen nach AV1 umwandeln",
+                                       G_CALLBACK(on_menu_convert), NULL);
+    g_object_set_data_full(G_OBJECT(convert), "paths", g_strdupv(paths),
+                           (GDestroyNotify)g_strfreev);
+    gtk_widget_set_tooltip_text(convert, "Spart Platz. Dateien, die schon AV1 sind, bleiben, "
+                                         "wie sie sind. Encoder und Qualität wie in den "
+                                         "Einstellungen.");
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
     GtkWidget *trash = add_menu_item(menu, single ? "In den Papierkorb verschieben"
                                      : "Alle Folgen in den Papierkorb verschieben",
@@ -4423,7 +4532,7 @@ static char *watch_text(const WatchState *w, const MdHistoryEntry *e)
     if (watch_done(w)) return g_strdup("Gesehen");
     if (watch_started(w) && w->duration > 0) {
         char *rest = md_format_time(w->duration - w->position);
-        char *text = g_strdup_printf("Noch %s", rest);
+        char *text = g_strdup_printf("%d %% · noch %s", watch_percent(w), rest);
         g_free(rest);
         return text;
     }
@@ -4707,11 +4816,22 @@ static int compare_watch_updated(gconstpointer a, gconstpointer b)
     return x->updated < y->updated ? 1 : x->updated > y->updated ? -1 : 0;
 }
 
+/* Trifft der Suchtext auf diesen Eintrag zu? */
+static bool entry_matches(const MdHistoryEntry *e, const char *filter)
+{
+    if (!*filter) return true;
+    char *text = g_strconcat(e->topic, " ", e->title, NULL), *lower = g_utf8_strdown(text, -1);
+    bool match = strstr(lower, filter) != NULL;
+    g_free(text);
+    g_free(lower);
+    return match;
+}
+
 static bool show_matches(const Show *show, const char *filter)
 {
     if (!*filter) return true;
     for (guint i = 0; i < show->entries->len; i++)
-        if (library_matches(show->entries->pdata[i], filter)) return true;
+        if (entry_matches(show->entries->pdata[i], filter)) return true;
     return false;
 }
 
@@ -4735,6 +4855,163 @@ static void collect_shows(void)
         current->newest = MAX(current->newest, e->finished);
         current->bytes += e->size;
     }
+}
+
+/* --- Kategorien in "Meine Videos" ----------------------------------------------------- */
+static char *show_key(const Show *show)
+{
+    char *lower = g_utf8_strdown(show->name, -1);
+    char *key = g_strdup_printf("%c:%s", show->is_film ? 'F' : 'S', lower);
+    g_free(lower);
+    return key;
+}
+
+static char *video_genres_path(void)
+{
+    return g_build_filename(md_app_dir(), VIDEO_GENRES_FILE, NULL);
+}
+
+/* Schlüssel <Tab> Kategorien mit "|" getrennt */
+static void video_genres_load(void)
+{
+    ui.video_genres = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                            (GDestroyNotify)g_strfreev);
+    ui.video_genres_asked = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    char *path = video_genres_path(), *text = NULL;
+    if (g_file_get_contents(path, &text, NULL, NULL)) {
+        char **lines = g_strsplit(text, "\n", -1);
+        for (int i = 0; lines[i]; i++) {
+            char **f = g_strsplit(lines[i], "\t", 2);
+            if (g_strv_length(f) == 2)
+                g_hash_table_replace(ui.video_genres, g_strdup(f[0]),
+                                     *f[1] ? g_strsplit(f[1], "|", -1) : g_new0(char *, 1));
+            g_strfreev(f);
+        }
+        g_strfreev(lines);
+    }
+    g_free(path);
+    g_free(text);
+}
+
+static void video_genres_save(void)
+{
+    GString *out = g_string_new(NULL);
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, ui.video_genres);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        /* ohne Treffer: beim nächsten Start noch einmal fragen, IMDb antwortet nicht immer */
+        if (!*(char **)value) continue;
+        char *joined = g_strjoinv("|", value);
+        g_string_append_printf(out, "%s\t%s\n", (char *)key, joined);
+        g_free(joined);
+    }
+    char *path = video_genres_path();
+    g_file_set_contents(path, out->str, out->len, NULL);
+    g_free(path);
+    g_string_free(out, TRUE);
+}
+
+/* Kategorien einer Serie oder eines Films; NULL = noch unbekannt (dann wird nachgefragt).
+ * Die Vorschau weiß es am genauesten, sonst IMDb. */
+static char **show_genres(const Show *show)
+{
+    char *key = show_key(show);
+    const Group *group = preview_group(show);
+    char **genres = g_hash_table_lookup(ui.video_genres, key);
+    if (group && group->genres && *group->genres &&
+        (!genres || !g_strv_equal((const char *const *)genres,
+                                  (const char *const *)group->genres))) {
+        genres = g_strdupv(group->genres);
+        g_hash_table_replace(ui.video_genres, g_strdup(key), genres);
+        video_genres_save();
+    }
+    if (!genres && !g_hash_table_contains(ui.video_genres_asked, key)) {
+        g_hash_table_add(ui.video_genres_asked, g_strdup(key));
+        GenreJob *job = g_new0(GenreJob, 1);
+        job->key = g_strdup(key);
+        job->name = g_strdup(show->name);
+        job->is_film = show->is_film;
+        job->videos = true;
+        g_thread_pool_push(ui.imdb_pool, job, NULL);
+    }
+    g_free(key);
+    return genres;
+}
+
+static bool show_has_genre(const Show *show, const char *genre)
+{
+    char **genres = show_genres(show);
+    if (!genres) return false;
+    if (!strcmp(genre, NO_GENRE)) return !*genres;
+    return g_strv_contains((const char *const *)genres, genre);
+}
+
+static void update_video_genre_choices(void);
+
+static gboolean on_video_genres_done(gpointer data)
+{
+    GenreJob *job = data;
+    g_hash_table_remove(ui.video_genres_asked, job->key);
+    if (!g_hash_table_contains(ui.video_genres, job->key)) {
+        g_hash_table_replace(ui.video_genres, g_strdup(job->key),
+                             job->genres ? g_steal_pointer(&job->genres) : g_new0(char *, 1));
+        video_genres_save();
+    }
+    /* erst wenn alle Antworten da sind, sonst springt die Auswahl bei jeder Antwort */
+    if (!g_hash_table_size(ui.video_genres_asked)) {
+        if (gtk_combo_box_get_active_id(GTK_COMBO_BOX(ui.videos_genre))) rebuild_videos(true);
+        else update_video_genre_choices();
+    }
+    g_strfreev(job->genres);
+    g_free(job->key);
+    g_free(job->name);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+/* Auswahl der Kategorien mit Anzahl, häufigste zuerst; die gewählte bleibt */
+static void update_video_genre_choices(void)
+{
+    GHashTable *counts = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; ui.shows && i < ui.shows->len; i++) {
+        char **genres = show_genres(ui.shows->pdata[i]);
+        char *none[] = {NO_GENRE, NULL};
+        for (char **g = genres && !*genres ? none : genres; g && *g; g++) {
+            int count = GPOINTER_TO_INT(g_hash_table_lookup(counts, *g));
+            g_hash_table_insert(counts, *g, GINT_TO_POINTER(count + 1));
+        }
+    }
+    GList *names = g_list_sort_with_data(g_hash_table_get_keys(counts), compare_genre_names,
+                                         counts);
+    GtkComboBoxText *combo = GTK_COMBO_BOX_TEXT(ui.videos_genre);
+    char *active = g_strdup(gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo)));
+    ui.updating_video_genres = true;
+    gtk_combo_box_text_remove_all(combo);
+    gtk_combo_box_text_append(combo, NULL, g_hash_table_size(ui.video_genres_asked)
+                                           ? "Alle Kategorien (werden ermittelt …)"
+                                           : "Alle Kategorien");
+    bool found = false;
+    for (GList *l = names; l; l = l->next) {
+        char *text = g_strdup_printf("%s (%d)", (char *)l->data,
+                                     GPOINTER_TO_INT(g_hash_table_lookup(counts, l->data)));
+        gtk_combo_box_text_append(combo, l->data, text);
+        found |= !g_strcmp0(active, l->data);
+        g_free(text);
+    }
+    if (active && found) gtk_combo_box_set_active_id(GTK_COMBO_BOX(combo), active);
+    else gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+    ui.updating_video_genres = false;
+    g_free(active);
+    g_list_free(names);
+    g_hash_table_destroy(counts);
+}
+
+static void on_videos_filter_changed(GtkComboBox *combo, gpointer d)
+{
+    (void)combo;
+    (void)d;
+    if (!ui.updating_video_genres) rebuild_videos(true);
 }
 
 /* Seite neu aufbauen; ohne force nur, wenn sich der Verlauf geändert hat */
@@ -4764,6 +5041,7 @@ static void rebuild_videos(bool force)
     collect_shows();
 
     char *filter = g_utf8_strdown(gtk_entry_get_text(GTK_ENTRY(ui.videos_search)), -1);
+    const char *genre = gtk_combo_box_get_active_id(GTK_COMBO_BOX(ui.videos_genre));
     int series = 0, films = 0;
     gint64 bytes = 0;
     GPtrArray *started = g_ptr_array_new(), *shown = g_ptr_array_new();
@@ -4772,26 +5050,22 @@ static void rebuild_videos(bool force)
         series += !show->is_film;
         films += show->is_film;
         bytes += show->bytes;
-        if (!show_matches(show, filter)) continue;
+        if (!show_matches(show, filter) || (genre && !show_has_genre(show, genre))) continue;
         g_ptr_array_add(shown, show);
         for (guint n = 0; n < show->entries->len; n++) {
             MdHistoryEntry *e = show->entries->pdata[n];
             if (watch_started(watch_get(e->path))) g_ptr_array_add(started, e);
         }
     }
-    if (!*filter && started->len) {
+    if (!*filter && !genre && started->len) {
         g_ptr_array_sort(started, compare_watch_updated);
         GtkWidget *box = add_videos_section("Weiterschauen", true);
         for (guint i = 0; i < MIN(started->len, VIDEOS_ROW_TILES); i++)
             add_entry_tile(box, started->pdata[i], true);
     }
-    if (!*filter && shown->len) {
-        g_ptr_array_sort(shown, compare_show_newest);
-        GtkWidget *box = add_videos_section("Zuletzt geladen", true);
-        for (guint i = 0; i < MIN(shown->len, VIDEOS_ROW_TILES); i++)
-            add_show_tile(box, shown->pdata[i]);
-    }
-    g_ptr_array_sort(shown, compare_show_names);
+    /* jede Serie und jeder Film nur einmal: sortiert nach Name oder nach dem letzten Download */
+    bool newest = !g_strcmp0(gtk_combo_box_get_active_id(GTK_COMBO_BOX(ui.videos_sort)), "neu");
+    g_ptr_array_sort(shown, newest ? compare_show_newest : compare_show_names);
     for (int film = 0; film < 2; film++) {
         GtkWidget *box = NULL;
         for (guint i = 0; i < shown->len; i++) {
@@ -4819,6 +5093,7 @@ static void rebuild_videos(bool force)
     g_ptr_array_free(started, TRUE);
     g_ptr_array_free(shown, TRUE);
     gtk_widget_show_all(ui.videos_content);
+    update_video_genre_choices();
 
     const Show *open = ui.open_show ? find_show(ui.open_show) : NULL;
     if (open) fill_show_page(open);
@@ -5335,8 +5610,12 @@ static void on_stack_page_changed(GObject *stack, GParamSpec *spec, gpointer d)
     (void)d;
     const char *name = gtk_stack_get_visible_child_name(GTK_STACK(stack));
     if (!g_strcmp0(name, "statistik")) rebuild_stats();
-    /* anderer Reiter gewählt: der Player hat keinen eigenen und geht zu */
-    if (g_strcmp0(name, "player") && md_player_current()) md_player_close();
+    if (!g_strcmp0(name, "player")) return;
+    /* hierhin kehrt der Player zurück, wenn er zugeht */
+    ui.player_return = gtk_stack_get_visible_child(GTK_STACK(stack));
+    /* anderer Reiter gewählt: ein laufendes Video spielt im kleinen Fenster weiter, sonst geht
+     * der Player zu */
+    if (md_player_current() && !md_player_pip()) md_player_close();
 }
 
 static GtkWidget *build_stats_page(void)
@@ -5430,8 +5709,8 @@ static gboolean on_folder_checked(gpointer data)
         GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
         for (guint i = 0; i < moved; i++)
             g_ptr_array_add(names, check_display_path(((MdMovedFile *)check->moved->pdata[i])->to));
-        char *text = g_strdup_printf("%u %s verschoben: neuen Ort übernehmen", moved,
-                                     moved == 1 ? "Datei wurde" : "Dateien wurden");
+        char *text = g_strdup_printf("Neuen Ort von %u verschobenen %s übernehmen", moved,
+                                     moved == 1 ? "Datei" : "Dateien");
         relink = add_check_option(box, text, true, names);
         g_free(text);
         g_ptr_array_free(names, TRUE);
@@ -5441,8 +5720,9 @@ static gboolean on_folder_checked(gpointer data)
         for (guint i = 0; i < found; i++)
             g_ptr_array_add(names, check_display_path(
                 ((MdFoundFile *)check->found->pdata[i])->path));
-        char *text = g_strdup_printf("%u %s noch nicht in „Meine Videos“: aufnehmen", found,
-                                     found == 1 ? "Datei ist" : "Dateien sind");
+        char *text = g_strdup_printf("%u %s in „Meine Videos“ aufnehmen, die dort noch %s", found,
+                                     found == 1 ? "Datei" : "Dateien",
+                                     found == 1 ? "fehlt" : "fehlen");
         add = add_check_option(box, text, true, names);
         g_free(text);
         g_ptr_array_free(names, TRUE);
@@ -5451,9 +5731,10 @@ static gboolean on_folder_checked(gpointer data)
         GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
         for (guint i = 0; i < missing; i++)
             g_ptr_array_add(names, check_display_path(check->missing->pdata[i]));
-        char *text = g_strdup_printf("%u %s im Verlauf, die Datei fehlt: Einträge entfernen "
-                                     "(die Folgen gelten dann als nicht geladen)", missing,
-                                     missing == 1 ? "Eintrag steht" : "Einträge stehen");
+        char *text = g_strdup_printf("%u %s aus dem Verlauf entfernen, %s Datei fehlt (die "
+                                     "Folgen gelten dann als nicht geladen)", missing,
+                                     missing == 1 ? "Eintrag" : "Einträge",
+                                     missing == 1 ? "dessen" : "deren");
         forget = add_check_option(box, text, false, names);
         g_free(text);
         g_ptr_array_free(names, TRUE);
@@ -5474,7 +5755,6 @@ static gboolean on_folder_checked(gpointer data)
         bool do_add = add && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(add));
         bool do_forget = forget && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(forget));
         md_folder_check_apply(check, do_relink, do_add, do_forget);
-        rebuild_library();
         rebuild_videos(true);
     }
     gtk_widget_destroy(d);
@@ -5524,6 +5804,24 @@ static GtkWidget *build_videos_page(void)
     g_signal_connect(ui.videos_search, "search-changed", G_CALLBACK(on_videos_search_changed),
                      NULL);
     gtk_box_pack_end(GTK_BOX(top), ui.videos_search, FALSE, FALSE, 0);
+    video_genres_load();
+    ui.videos_genre = gtk_combo_box_text_new();
+    gtk_widget_set_tooltip_text(ui.videos_genre, "Nur eine Kategorie zeigen");
+    gtk_widget_set_valign(ui.videos_genre, GTK_ALIGN_CENTER);
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(ui.videos_genre), NULL, "Alle Kategorien");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.videos_genre), 0);
+    g_signal_connect(ui.videos_genre, "changed", G_CALLBACK(on_videos_filter_changed), NULL);
+    GtkWidget *filters = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_top(filters, 6);
+    ui.videos_sort = gtk_combo_box_text_new();
+    gtk_widget_set_tooltip_text(ui.videos_sort, "Reihenfolge der Serien und Filme");
+    gtk_widget_set_valign(ui.videos_sort, GTK_ALIGN_CENTER);
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(ui.videos_sort), "name", "A bis Z");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(ui.videos_sort), "neu", "Zuletzt geladen");
+    gtk_combo_box_set_active_id(GTK_COMBO_BOX(ui.videos_sort), "name");
+    g_signal_connect(ui.videos_sort, "changed", G_CALLBACK(on_videos_filter_changed), NULL);
+    gtk_box_pack_start(GTK_BOX(filters), ui.videos_sort, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(filters), ui.videos_genre, FALSE, FALSE, 0);
     ui.videos_check = gtk_button_new_with_label("Ordner prüfen");
     gtk_widget_set_tooltip_text(ui.videos_check, "Speicherort mit dem Verlauf abgleichen: "
                                 "verschobene, neue und fehlende Dateien finden");
@@ -5531,6 +5829,7 @@ static GtkWidget *build_videos_page(void)
     g_signal_connect(ui.videos_check, "clicked", G_CALLBACK(on_videos_check_clicked), NULL);
     gtk_box_pack_end(GTK_BOX(top), ui.videos_check, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), top, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(page), filters, FALSE, FALSE, 0);
     ui.videos_content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_box_pack_start(GTK_BOX(page), ui.videos_content, FALSE, FALSE, 0);
     gtk_stack_add_named(GTK_STACK(ui.videos_stack), ui.videos_scroller, "uebersicht");
@@ -5572,9 +5871,22 @@ static GtkWidget *build_videos_page(void)
 static void update_settings_rows(void)
 {
     gtk_widget_set_sensitive(ui.encoder_row, ui.cfg.convert);
+    gtk_widget_set_sensitive(ui.level_row, ui.cfg.convert);
     gtk_widget_set_sensitive(ui.keep_row, ui.cfg.convert);
     gtk_widget_set_sensitive(ui.gpu_row, ui.cfg.convert && ui.cfg.encoder == MD_ENCODER_GPU);
     gtk_widget_set_sensitive(ui.cpu_row, ui.cfg.convert && ui.cfg.encoder == MD_ENCODER_CPU);
+    /* die Rohwerte nur bei "Eigene Werte" */
+    bool custom = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.level_combo)) == AV1_LEVEL_CUSTOM;
+    gtk_widget_set_visible(ui.gpu_row, custom);
+    gtk_widget_set_visible(ui.cpu_row, custom);
+}
+
+/* Stufe, zu der die Werte passen; sonst "Eigene Werte" */
+static int av1_level(int gpu, int cpu)
+{
+    for (size_t i = 0; i < AV1_LEVEL_CUSTOM; i++)
+        if (AV1_LEVELS[i].gpu == gpu && AV1_LEVELS[i].cpu == cpu) return (int)i;
+    return AV1_LEVEL_CUSTOM;
 }
 
 static void update_dir_label(void)
@@ -5582,9 +5894,13 @@ static void update_dir_label(void)
     char *display = g_filename_display_name(ui.cfg.dir);
     set_label_text(ui.dir_sub, display);
     g_free(display);
-    display = g_filename_display_name(ui.cfg.cache_dir);
-    set_label_text(ui.cache_sub, display);
+    display = g_filename_display_name(md_app_dir());
+    char *sub = g_strdup_printf("%s\nEinstellungen, Verlauf, Warteschlange und Zwischenspeicher; "
+                                "beim Wechsel zieht alles mit um", display);
+    set_label_text(ui.cache_sub, sub);
+    g_free(sub);
     g_free(display);
+    gtk_widget_set_sensitive(ui.data_reset, md_data_parent() != NULL);
 }
 
 /* Ordner wählen lassen -> neuer Pfad oder NULL */
@@ -5617,17 +5933,52 @@ static void on_choose_dir_clicked(GtkButton *b, gpointer d)
     update_selection();
 }
 
+/* Alle Programmdaten in einen anderen Ordner verschieben; parent NULL = Standardordner */
+static void move_data(const char *parent)
+{
+    char *target = parent ? g_build_filename(parent, "Mediathek Downloader", NULL)
+                          : md_default_data_dir();
+    char *text = g_strdup_printf("Einstellungen, Verlauf, Warteschlange, Protokoll und "
+                                 "Zwischenspeicher ziehen nach %s um. Der Zwischenspeicher folgt "
+                                 "im Hintergrund.", target);
+    bool yes = ask_confirmation("Programmdaten verschieben?", text, "Abbrechen", "Verschieben",
+                                false);
+    g_free(text);
+    g_free(target);
+    if (!yes) return;
+    char *error = NULL;
+    if (!md_set_data_parent(parent, &error)) {
+        show_info_bar(GTK_MESSAGE_ERROR, error);
+        g_free(error);
+        update_dir_label();
+        return;
+    }
+    settings_save();
+    update_dir_label();
+    char *display = g_filename_display_name(md_app_dir());
+    char *done = g_strdup_printf("Die Programmdaten liegen jetzt in %s.", display);
+    show_info_bar(GTK_MESSAGE_INFO, done);
+    g_free(done);
+    g_free(display);
+}
+
 static void on_choose_cache_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
     (void)d;
-    char *path = choose_folder("Ordner für Zwischenspeicher wählen", ui.cfg.cache_dir);
-    if (!path) return;
-    g_free(ui.cfg.cache_dir);
-    ui.cfg.cache_dir = path;
-    update_dir_label();
-    apply_queue_settings();
-    settings_save();
+    char *start = md_data_parent() ? g_strdup(md_data_parent())
+                                   : g_path_get_dirname(md_app_dir());
+    char *path = choose_folder("Ordner für Programmdaten wählen", start);
+    g_free(start);
+    if (path) move_data(path);
+    g_free(path);
+}
+
+static void on_data_reset_clicked(GtkButton *b, gpointer d)
+{
+    (void)b;
+    (void)d;
+    move_data(NULL);
 }
 
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
@@ -5637,9 +5988,18 @@ static GtkWidget *update_switch, *news_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
-    (void)w;
     (void)d;
     Config *c = &ui.cfg;
+    int level = gtk_combo_box_get_active(GTK_COMBO_BOX(ui.level_combo));
+    if (w == ui.level_combo && level >= 0 && level < (int)AV1_LEVEL_CUSTOM) {
+        /* Stufe gewählt: die Rohwerte folgen */
+        g_signal_handlers_block_by_func(gpu_spin, on_setting_changed, NULL);
+        g_signal_handlers_block_by_func(cpu_spin, on_setting_changed, NULL);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(gpu_spin), AV1_LEVELS[level].gpu);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(cpu_spin), AV1_LEVELS[level].cpu);
+        g_signal_handlers_unblock_by_func(gpu_spin, on_setting_changed, NULL);
+        g_signal_handlers_unblock_by_func(cpu_spin, on_setting_changed, NULL);
+    }
     int old_quality = c->quality;
     c->quality = gtk_combo_box_get_active(GTK_COMBO_BOX(quality_combo));
     c->encoder = gtk_combo_box_get_active(GTK_COMBO_BOX(encoder_combo));
@@ -5711,29 +6071,49 @@ static GtkWidget *build_settings_page(void)
     GtkWidget *choose = gtk_button_new_with_label("Ändern …");
     g_signal_connect(choose, "clicked", G_CALLBACK(on_choose_dir_clicked), NULL);
     add_row(where, "Speicherort", "", NULL, choose, &ui.dir_sub);
+    GtkWidget *data_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    /* beschriftet: der Knopf verschiebt alle Daten, ein Rückgängig-Symbol wirkt zu harmlos */
+    ui.data_reset = gtk_button_new_with_label("Standardordner");
+    gtk_widget_set_tooltip_text(ui.data_reset, "Alle Programmdaten zurück in den Standardordner "
+                                               "verschieben");
+    gtk_widget_set_valign(ui.data_reset, GTK_ALIGN_CENTER);
+    g_signal_connect(ui.data_reset, "clicked", G_CALLBACK(on_data_reset_clicked), NULL);
     GtkWidget *cache = gtk_button_new_with_label("Ändern …");
+    gtk_widget_set_valign(cache, GTK_ALIGN_CENTER);
     g_signal_connect(cache, "clicked", G_CALLBACK(on_choose_cache_clicked), NULL);
-    GtkWidget *cache_row = add_row(where, "Ordner für Zwischenspeicher", "", NULL, cache,
+    gtk_box_pack_start(GTK_BOX(data_buttons), ui.data_reset, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(data_buttons), cache, FALSE, FALSE, 0);
+    GtkWidget *cache_row = add_row(where, "Ordner für Programmdaten", "", NULL, data_buttons,
                                    &ui.cache_sub);
-    gtk_widget_set_tooltip_text(cache_row, "Hier liegen Titelbilder und Kategorien der Vorschau.");
+    gtk_widget_set_tooltip_text(cache_row, "Im gewählten Ordner entsteht dafür der Unterordner "
+                                           "„Mediathek Downloader“.");
     quality_combo = new_setting_combo(QUALITY_TEXT, 3, c->quality);
     add_row(where, "Qualität", NULL, NULL, quality_combo, NULL);
 
-    GtkWidget *av1 = add_group(page, "AV1");
+    GtkWidget *av1 = add_group(page, "Platz sparen (AV1-Umwandlung)");
     av1_switch = new_setting_switch(c->convert);
-    add_row(av1, "Nach dem Download nach AV1 umwandeln",
-            "Spart meist die Hälfte des Platzes. Schwarze Balken im Bild werden abgeschnitten. Das "
-            "Ergebnis wird geprüft; ist es nicht kleiner, bleibt die MP4-Datei.", NULL, av1_switch,
-            NULL);
+    add_row(av1, "Nach dem Download verkleinern",
+            "Wandelt ins Format AV1 um; das spart meist die Hälfte des Platzes bei gleichem Bild. "
+            "Schwarze Balken im Bild werden abgeschnitten. Das Ergebnis wird geprüft; ist es nicht "
+            "kleiner, bleibt die MP4-Datei.", NULL, av1_switch, NULL);
     encoder_combo = new_setting_combo(ENCODER_TEXT, 2, c->encoder);
-    ui.encoder_row = add_row(av1, "Encoder", "GPU wird geprüft …", NULL, encoder_combo,
-                             &ui.encoder_sub);
+    ui.encoder_row = add_row(av1, "Umwandlung mit", "Grafikkarte wird geprüft …", NULL,
+                             encoder_combo, &ui.encoder_sub);
+    ui.level_combo = gtk_combo_box_text_new();
+    for (size_t i = 0; i < AV1_LEVEL_CUSTOM; i++)
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui.level_combo), AV1_LEVELS[i].text);
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui.level_combo), "Eigene Werte");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui.level_combo), av1_level(c->gpu_quality, c->cpu_rf));
+    gtk_widget_set_valign(ui.level_combo, GTK_ALIGN_CENTER);
+    g_signal_connect(ui.level_combo, "changed", G_CALLBACK(on_setting_changed), NULL);
+    ui.level_row = add_row(av1, "Bildqualität", "Bessere Qualität ergibt größere Dateien.", NULL,
+                           ui.level_combo, NULL);
     gpu_spin = new_setting_spin(1, 255, c->gpu_quality);
-    ui.gpu_row = add_row(av1, "GPU-Qualität", "Kleiner = besser und größer. Standard 64.", NULL,
-                         gpu_spin, NULL);
+    ui.gpu_row = add_row(av1, "Grafikkarte: Qualitätswert",
+                         "Kleiner = besser und größer. „Sehr gut“ ist 64.", NULL, gpu_spin, NULL);
     cpu_spin = new_setting_spin(1, 63, c->cpu_rf);
-    ui.cpu_row = add_row(av1, "CPU-Qualität (RF)", "Kleiner = besser und größer. Standard 35.",
-                         NULL, cpu_spin, NULL);
+    ui.cpu_row = add_row(av1, "Prozessor: Qualitätswert (RF)",
+                         "Kleiner = besser und größer. „Sehr gut“ ist 35.", NULL, cpu_spin, NULL);
     keep_switch = new_setting_switch(c->keep_original);
     ui.keep_row = add_row(av1, "Original behalten",
                           "Sonst wird die MP4-Datei nach geprüfter Umwandlung gelöscht.", NULL,
@@ -5772,11 +6152,16 @@ static GtkWidget *build_settings_page(void)
     char *installed = g_strdup_printf("Installiert ist Version %s. Neue Versionen kommen von "
                                       "GitHub und werden vor dem Installieren geprüft.",
                                       MD_VERSION);
-    add_row(updates, "Beim Start nach Updates suchen", installed, NULL, update_switch, NULL);
-    g_free(installed);
+    /* eine Zeile statt zwei ähnlich klingender: Schalter für den Start, Knopf für jetzt */
+    GtkWidget *update_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget *check = gtk_button_new_with_label("Jetzt suchen");
     gtk_actionable_set_action_name(GTK_ACTIONABLE(check), "app.check-update");
-    add_row(updates, "Nach Updates suchen", NULL, NULL, check, NULL);
+    gtk_widget_set_valign(check, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(update_switch, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(update_box), check, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(update_box), update_switch, FALSE, FALSE, 0);
+    add_row(updates, "Beim Start nach Updates suchen", installed, NULL, update_box, NULL);
+    g_free(installed);
     return scrolled;
 }
 
@@ -5784,8 +6169,9 @@ static GtkWidget *build_settings_page(void)
 static gboolean on_gpu_checked(gpointer d)
 {
     ui.gpu_ok = d != NULL;
-    set_label_text(ui.encoder_sub, ui.gpu_ok ? "GPU-Encoder gefunden. Empfohlen."
-                   : "Kein GPU-Encoder gefunden – die CPU übernimmt, das dauert sehr viel länger.");
+    set_label_text(ui.encoder_sub, ui.gpu_ok ? "Die Grafikkarte kann AV1. Empfohlen."
+                   : "Die Grafikkarte kann kein AV1 – der Prozessor übernimmt, das dauert sehr viel "
+                     "länger.");
     return G_SOURCE_REMOVE;
 }
 
@@ -5810,7 +6196,7 @@ static void set_compact_tabs(bool compact)
     static const char *const ICONS[][2] = {
         {"vorschau", "view-grid-symbolic"}, {"neu", "starred-symbolic"},
         {"videos", "video-x-generic-symbolic"}, {"downloads", "folder-download-symbolic"},
-        {"bibliothek", "view-list-symbolic"}, {"statistik", "x-office-spreadsheet-symbolic"},
+        {"statistik", "x-office-spreadsheet-symbolic"},
         {"einstellungen", "emblem-system-symbolic"}};
     for (size_t i = 0; i < G_N_ELEMENTS(ICONS); i++) {
         GtkWidget *page = gtk_stack_get_child_by_name(GTK_STACK(ui.stack), ICONS[i][0]);
@@ -6192,6 +6578,158 @@ static void on_action_quit(GSimpleAction *a, GVariant *p, gpointer d)
     if (ui.win) gtk_window_close(GTK_WINDOW(ui.win));
 }
 
+/* Reiter in der Reihenfolge der Kopfzeile; Strg+1 … Strg+6 */
+static const char *const PAGE_NAMES[] = {"vorschau", "neu", "videos", "downloads", "statistik",
+                                         "einstellungen"};
+
+static void on_action_page(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)d;
+    gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), g_variant_get_string(p, NULL));
+}
+
+/* Strg+Bild↑/↓: Reiter davor oder danach; im Player gilt der Reiter, aus dem er kam */
+static void step_page(int step)
+{
+    const char *name = gtk_stack_get_visible_child_name(GTK_STACK(ui.stack));
+    if (!g_strcmp0(name, "player") && ui.player_return)
+        gtk_container_child_get(GTK_CONTAINER(ui.stack), ui.player_return, "name", &name, NULL);
+    int count = G_N_ELEMENTS(PAGE_NAMES), at = 0;
+    for (int i = 0; i < count; i++)
+        if (!g_strcmp0(name, PAGE_NAMES[i])) at = i;
+    gtk_stack_set_visible_child_name(GTK_STACK(ui.stack),
+                                     PAGE_NAMES[(at + step + count) % count]);
+}
+
+static void on_action_next_page(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    step_page(1);
+}
+
+static void on_action_previous_page(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    step_page(-1);
+}
+
+/* Strg+F: in "Meine Videos" deren Suchfeld, sonst das der Vorschau */
+static void on_action_find(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    bool videos = !g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(ui.stack)), "videos");
+    GtkWidget *entry = videos ? ui.videos_search : ui.preview_search;
+    if (!videos) gtk_stack_set_visible_child_name(GTK_STACK(ui.stack), "vorschau");
+    if (videos && ui.open_show) on_show_back_clicked(NULL, NULL);  /* das Suchfeld ist oben */
+    gtk_widget_grab_focus(entry);
+    gtk_editable_select_region(GTK_EDITABLE(entry), 0, -1);
+}
+
+/* F5: was die Seite neu laden kann */
+static void on_action_reload(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    const char *name = gtk_stack_get_visible_child_name(GTK_STACK(ui.stack));
+    if (!g_strcmp0(name, "vorschau")) on_preview_refresh_clicked(NULL, NULL);
+    else if (!g_strcmp0(name, "neu")) start_news_load();
+    else if (!g_strcmp0(name, "videos")) rebuild_videos(true);
+}
+
+/* Liste "Taste – Wirkung" in einen Abschnitt des Dialogs */
+static void add_key_section(GtkWidget *box, const char *title, const char *keys)
+{
+    GtkWidget *heading = new_label(title, "zd-heading");
+    gtk_widget_set_margin_top(heading, 6);
+    gtk_box_pack_start(GTK_BOX(box), heading, FALSE, FALSE, 0);
+    GtkWidget *grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 24);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
+    char **lines = g_strsplit(keys, "\n", -1);
+    for (int i = 0; lines[i]; i++) {
+        char **parts = g_strsplit(lines[i], "\t", 2);
+        if (parts[0] && parts[1]) {
+            GtkWidget *key = new_label(parts[0], "zd-title");
+            gtk_grid_attach(GTK_GRID(grid), key, 0, i, 1, 1);
+            gtk_grid_attach(GTK_GRID(grid), new_label(parts[1], NULL), 1, i, 1, 1);
+        }
+        g_strfreev(parts);
+    }
+    g_strfreev(lines);
+    gtk_box_pack_start(GTK_BOX(box), grid, FALSE, FALSE, 0);
+}
+
+/* Dialog mit Überschrift und Inhalt; schließt mit "Schließen" oder Esc */
+static void show_text_dialog(const char *title, GtkWidget *content)
+{
+    GtkWidget *d = gtk_dialog_new_with_buttons(title, GTK_WINDOW(ui.win),
+                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               "Schließen", GTK_RESPONSE_CLOSE, NULL);
+    gtk_window_set_default_size(GTK_WINDOW(d), 560, -1);
+    GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(d));
+    gtk_container_set_border_width(GTK_CONTAINER(content), 18);
+    gtk_box_pack_start(GTK_BOX(area), content, TRUE, TRUE, 0);
+    gtk_widget_show_all(d);
+    gtk_dialog_run(GTK_DIALOG(d));
+    gtk_widget_destroy(d);
+}
+
+static void on_action_shortcuts(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    add_key_section(box, "Hauptfenster",
+                    "Strg+1 … Strg+6\tReiter Vorschau, Neue Folgen, Meine Videos, Warteschlange, "
+                    "Statistik, Einstellungen\n"
+                    "Strg+Bild↓ / Strg+Bild↑\tNächster / voriger Reiter\n"
+                    "Strg+F\tSuchfeld (in „Meine Videos“ deren eigenes)\n"
+                    "Enter im Suchfeld der Vorschau\tIn allen Mediatheken suchen\n"
+                    "F5\tSeite neu laden\n"
+                    "F1\tDiese Übersicht\n"
+                    "Strg+Q\tBeenden");
+    add_key_section(box, "Player", md_player_keys_text());
+    show_text_dialog("Tastenkürzel", box);
+}
+
+static void on_action_help(GSimpleAction *a, GVariant *p, gpointer d)
+{
+    (void)a;
+    (void)p;
+    (void)d;
+    static const char *const STEPS[][2] = {
+        {"1. Finden", "Die Vorschau zeigt die neuesten Filme und Serien aller Mediatheken. Tippen "
+                      "filtert sie, Enter sucht in allen Mediatheken auch nach älteren Titeln."},
+        {"2. Auswählen", "Das Häkchen auf einer Kachel wählt einen Film oder alle fehlenden Folgen "
+                         "einer Serie; ein Klick auf die Kachel zeigt Staffeln und Folgen."},
+        {"3. Laden", "„Herunterladen“ unten rechts stellt die Auswahl in die Warteschlange. Dort "
+                     "lässt sich alles anhalten und fortsetzen, auch nach einem Neustart."},
+        {"4. Schauen", "Fertiges steht unter „Meine Videos“ und spielt im eingebauten Player; "
+                       "„?“ zeigt dort alle Tasten."},
+        {"5. Dranbleiben", "„Neue Folgen“ prüft, was bei deinen Serien neu gesendet wurde. In den "
+                           "Einstellungen lässt sich das auch automatisch laden."},
+        {"Platz sparen", "In den Einstellungen wandelt „Platz sparen“ jedes Video nach dem "
+                         "Download ins Format AV1 um, meist halb so groß."}};
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    for (size_t i = 0; i < G_N_ELEMENTS(STEPS); i++) {
+        GtkWidget *heading = new_label(STEPS[i][0], "zd-heading");
+        gtk_widget_set_margin_top(heading, i ? 10 : 0);
+        gtk_box_pack_start(GTK_BOX(box), heading, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(box), set_wrapping(new_label(STEPS[i][1], NULL), 60), FALSE,
+                           FALSE, 0);
+    }
+    show_text_dialog("Erste Schritte", box);
+}
+
 static void on_startup(GApplication *app, gpointer d)
 {
     (void)d;
@@ -6203,20 +6741,51 @@ static void on_startup(GApplication *app, gpointer d)
         {.name = "check-update", .activate = on_action_check_update},
         {.name = "about", .activate = on_action_about},
         {.name = "quit", .activate = on_action_quit},
+        {.name = "page", .activate = on_action_page, .parameter_type = "s"},
+        {.name = "next-page", .activate = on_action_next_page},
+        {.name = "previous-page", .activate = on_action_previous_page},
+        {.name = "find", .activate = on_action_find},
+        {.name = "reload", .activate = on_action_reload},
+        {.name = "shortcuts", .activate = on_action_shortcuts},
+        {.name = "help", .activate = on_action_help},
     };
     g_action_map_add_action_entries(G_ACTION_MAP(app), actions, G_N_ELEMENTS(actions), NULL);
-    const char *quit_accels[] = {"<Control>q", NULL};
-    gtk_application_set_accels_for_action(GTK_APPLICATION(app), "app.quit", quit_accels);
+    static const struct {
+        const char *action, *keys[3];
+    } ACCELS[] = {{"app.quit", {"<Control>q"}},
+                  {"app.next-page", {"<Control>Page_Down"}},
+                  {"app.previous-page", {"<Control>Page_Up"}},
+                  {"app.find", {"<Control>f"}},
+                  {"app.reload", {"F5"}},
+                  {"app.shortcuts", {"F1", "<Control>question"}}};
+    for (size_t i = 0; i < G_N_ELEMENTS(ACCELS); i++)
+        gtk_application_set_accels_for_action(GTK_APPLICATION(app), ACCELS[i].action,
+                                              ACCELS[i].keys);
+    for (size_t i = 0; i < G_N_ELEMENTS(PAGE_NAMES); i++) {
+        char *action = g_strdup_printf("app.page::%s", PAGE_NAMES[i]);
+        char *key = g_strdup_printf("<Control>%zu", i + 1);
+        const char *keys[] = {key, NULL};
+        gtk_application_set_accels_for_action(GTK_APPLICATION(app), action, keys);
+        g_free(action);
+        g_free(key);
+    }
 }
 
 static GtkWidget *build_menu_button(void)
 {
-    GMenu *menu = g_menu_new(), *about = g_menu_new();
-    g_menu_append(menu, "Protokoll öffnen", "app.open-log");
-    g_menu_append(menu, "Datenordner öffnen", "app.open-data");
+    GMenu *menu = g_menu_new(), *help = g_menu_new(), *about = g_menu_new();
+    g_menu_append(help, "Erste Schritte", "app.help");
+    g_menu_append(help, "Tastenkürzel", "app.shortcuts");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(help));
+    GMenu *files = g_menu_new();
+    g_menu_append(files, "Protokoll öffnen", "app.open-log");
+    g_menu_append(files, "Datenordner öffnen", "app.open-data");
+    g_menu_append_section(menu, NULL, G_MENU_MODEL(files));
+    g_object_unref(files);
     g_menu_append(about, "Nach Updates suchen", "app.check-update");
     g_menu_append(about, "Über Mediathek Downloader", "app.about");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(about));
+    g_object_unref(help);
     GtkWidget *menu_button = gtk_menu_button_new();
     gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_button), G_MENU_MODEL(menu));
     gtk_button_set_image(GTK_BUTTON(menu_button),
@@ -6230,6 +6799,7 @@ static GtkWidget *build_menu_button(void)
 /* Beim Start: Hinweis auf fehlende Programme und liegengebliebene Downloads */
 static void show_start_notes(void)
 {
+    if (md_data_problem()) show_info_bar(GTK_MESSAGE_WARNING, md_data_problem());
     char *missing = NULL;
     if (!md_have_tools(&missing)) {
         char *text = g_strdup_printf("%s ist nicht installiert – bitte über die "
@@ -6244,7 +6814,7 @@ static void show_start_notes(void)
     for (int i = 0; i < count; i++) paused += jobs[i].paused;
     md_queue_snapshot_free(jobs, count);
     if (paused) {
-        char *text = g_strdup_printf("%d %s vom letzten Mal – auf der Seite Downloads fortsetzen.",
+        char *text = g_strdup_printf("%d %s vom letzten Mal – in der Warteschlange fortsetzen.",
                                      paused, plural(paused, "Download wartet", "Downloads warten"));
         show_info_bar(GTK_MESSAGE_INFO, text);
         g_free(text);
@@ -6299,8 +6869,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     ui.videos_page = build_videos_page();
     gtk_stack_add_titled(GTK_STACK(ui.stack), ui.videos_page, "videos", "Meine Videos");
     ui.downloads_page = build_downloads_page();
-    gtk_stack_add_titled(GTK_STACK(ui.stack), ui.downloads_page, "downloads", "Downloads");
-    gtk_stack_add_titled(GTK_STACK(ui.stack), build_library_page(), "bibliothek", "Bibliothek");
+    gtk_stack_add_titled(GTK_STACK(ui.stack), ui.downloads_page, "downloads", "Warteschlange");
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_stats_page(), "statistik", "Statistik");
     gtk_stack_add_titled(GTK_STACK(ui.stack), build_settings_page(), "einstellungen",
                          "Einstellungen");
@@ -6328,15 +6897,16 @@ static void on_activate(GtkApplication *app, gpointer d)
     gtk_widget_set_no_show_all(ui.header_spinner, TRUE);
     update_dir_label();
     update_settings_rows();
+    /* vor dem ersten Aufbau: "Meine Videos" fragt gleich nach Kategorien */
+    ui.cover_pool = g_thread_pool_new(cover_worker, NULL, COVER_THREADS, FALSE, NULL);
+    ui.imdb_pool = g_thread_pool_new(imdb_genres_worker, NULL, IMDB_THREADS, FALSE, NULL);
+    g_thread_pool_set_sort_function(ui.imdb_pool, compare_genre_jobs, NULL);
+    g_thread_pool_set_sort_function(ui.cover_pool, compare_cover_jobs, NULL);
     rebuild_results();
-    rebuild_library();
     rebuild_videos(true);
     if (!md_stats_load()) stats_import();   /* erst jetzt kennen die Dateien ihre Serie */
     show_start_notes();
     g_timeout_add(TICK_MS, on_tick, NULL);
-    ui.cover_pool = g_thread_pool_new(cover_worker, NULL, COVER_THREADS, FALSE, NULL);
-    ui.imdb_pool = g_thread_pool_new(imdb_genres_worker, NULL, IMDB_THREADS, FALSE, NULL);
-    g_thread_pool_set_sort_function(ui.cover_pool, compare_cover_jobs, NULL);
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();
     sync_genre_chips();

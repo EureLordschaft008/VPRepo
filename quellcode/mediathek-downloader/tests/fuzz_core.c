@@ -197,7 +197,7 @@ int main(void)
     double seconds = seconds_text ? g_ascii_strtod(seconds_text, NULL) : 10;
     printf("Fuzz-Lauf: %.0f s, FUZZ_SEED=%u\n", seconds, seed);
     fflush(stdout);
-    md_set_cover_dir(test_dir);
+    md_init(false);     /* Datenordner samt Zwischenspeicher im Testordner (HOME) */
     GRand *rand = g_rand_new_with_seed(seed);
     GTimer *timer = g_timer_new();
     gint64 counts[TARGET_COUNT] = {0};

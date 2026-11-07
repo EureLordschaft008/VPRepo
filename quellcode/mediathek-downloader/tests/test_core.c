@@ -389,6 +389,89 @@ static void test_autostart(void)
 }
 #endif
 
+#ifndef G_OS_WIN32
+static void write_test_file(const char *dir, const char *name, const char *text)
+{
+    char *path = g_build_filename(dir, name, NULL);
+    g_assert_true(g_file_set_contents(path, text, -1, NULL));
+    g_free(path);
+}
+
+static bool test_file_exists(const char *dir, const char *name)
+{
+    char *path = g_build_filename(dir, name, NULL);
+    bool exists = g_file_test(path, G_FILE_TEST_EXISTS);
+    g_free(path);
+    return exists;
+}
+
+/* Der Zwischenspeicher zieht im Hintergrund um: höchstens fünf Sekunden warten */
+static bool wait_for_file(const char *dir, const char *name)
+{
+    for (int i = 0; i < 100 && !test_file_exists(dir, name); i++) g_usleep(50000);
+    return test_file_exists(dir, name);
+}
+
+#define CACHE_NAME "0123456789abcdef0123456789abcdef01234567.info"
+#define FOREIGN_CACHE_NAME "89abcdef0123456789abcdef0123456789abcdef.api"
+
+/* Datenordner: Daten von 2.2 bleiben gültig, ein gewählter Ordner bekommt alles samt
+ * Zwischenspeicher, aus einem alten Cacheordner kommen nur Dateien des Zwischenspeichers mit */
+static void test_data_dir(void)
+{
+    char *legacy = g_build_filename(test_dir, LEGACY_APP_DIR, NULL);
+    char *old_cache = g_build_filename(legacy, OLD_CACHE_DIR_NAME, NULL);
+    g_mkdir_with_parents(old_cache, 0755);
+    write_test_file(legacy, "einstellungen.ini", "[Einstellungen]\n");
+    write_test_file(old_cache, CACHE_NAME, "Bild\n");
+    md_init(false);
+    g_assert_cmpstr(md_app_dir(), ==, legacy);
+    char *cache = g_build_filename(legacy, CACHE_DIR_NAME, NULL);
+    g_assert_true(test_file_exists(cache, CACHE_NAME));
+    g_free(cache);
+
+    char *parent = g_build_filename(test_dir, "Daten", NULL), *error = NULL;
+    char *dir = g_build_filename(parent, DATA_DIR_NAME, NULL);
+    g_assert_true(md_set_data_parent(parent, &error));
+    g_assert_null(error);
+    g_assert_cmpstr(md_app_dir(), ==, dir);
+    g_assert_cmpstr(md_data_parent(), ==, parent);
+    g_assert_true(test_file_exists(dir, "einstellungen.ini"));
+    g_assert_false(test_file_exists(legacy, "einstellungen.ini"));
+    cache = g_build_filename(dir, CACHE_DIR_NAME, NULL);
+    g_assert_true(wait_for_file(cache, CACHE_NAME));
+    char *pointer = pointer_path(), *saved = NULL;
+    g_assert_true(g_file_get_contents(pointer, &saved, NULL, NULL));
+    g_assert_cmpstr(saved, ==, parent);
+
+    char *foreign = g_build_filename(test_dir, "Filme", NULL);
+    g_mkdir_with_parents(foreign, 0755);
+    write_test_file(foreign, FOREIGN_CACHE_NAME, "{}");
+    write_test_file(foreign, "Film.mkv", "Video");
+    md_adopt_cache(foreign);
+    g_assert_true(wait_for_file(cache, FOREIGN_CACHE_NAME));
+    g_assert_true(test_file_exists(foreign, "Film.mkv"));
+    g_assert_false(test_file_exists(foreign, FOREIGN_CACHE_NAME));
+
+    g_assert_true(md_set_data_parent(NULL, &error));
+    g_assert_cmpstr(md_app_dir(), ==, legacy);
+    g_assert_null(md_data_parent());
+    g_assert_true(test_file_exists(legacy, "einstellungen.ini"));
+    g_assert_false(g_file_test(pointer, G_FILE_TEST_EXISTS));
+    g_free(cache);
+    cache = g_build_filename(legacy, CACHE_DIR_NAME, NULL);
+    g_assert_true(wait_for_file(cache, FOREIGN_CACHE_NAME));
+    g_free(legacy);
+    g_free(old_cache);
+    g_free(cache);
+    g_free(parent);
+    g_free(dir);
+    g_free(pointer);
+    g_free(saved);
+    g_free(foreign);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     test_dir_create();
@@ -407,6 +490,7 @@ int main(int argc, char **argv)
     g_test_add_func("/av1/schwarze-balken", test_crop_bars);
 #ifndef G_OS_WIN32
     g_test_add_func("/autostart/eintrag", test_autostart);
+    g_test_add_func("/daten/umzug", test_data_dir);
 #endif
     GThread *server = server_start();
     int result = g_test_run();

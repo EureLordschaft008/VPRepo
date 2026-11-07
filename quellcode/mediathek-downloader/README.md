@@ -39,7 +39,8 @@ ffmpeg und curl sind dabei. Die Terminal-Version liegt als `mediathek-downloader
 Unterordner `bin`. Windows SmartScreen kennt den Installer nicht und warnt beim ersten Start
 („Weitere Informationen“ → „Trotzdem ausführen“), weil er nicht signiert ist.
 
-Einstellungen, Verlauf und Protokoll liegen unter Windows in `%USERPROFILE%\.mediathek-downloader`.
+Einstellungen, Verlauf, Protokoll und Zwischenspeicher liegen unter Windows im Unterordner `Daten`
+des Installationsordners, solange kein anderer Ordner gewählt ist (siehe „Programmdaten“).
 Deinstallieren über die Windows-Einstellungen (Apps); Einstellungen und Videos bleiben dabei.
 
 ### Updates
@@ -61,7 +62,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   merkt einen Film vor, bei einer Serie alle fehlenden Folgen. Ein Klick auf die Kachel öffnet
   Bild, Beschreibung und alle Staffeln und Folgen zum einzelnen Auswählen. „Herunterladen“ startet
   alles auf einmal. Das Feld oben filtert die geladenen Titel nach Namen, das Menü daneben nach
-  Sprache der Tonspur. Fehlt die Seite eines Titels, kommt das Bild als Standbild aus dem Video.
+  Sprache der Tonspur. Enter im Feld sucht in allen Mediatheken, auch nach älteren Titeln, und
+  nimmt die Treffer in die Vorschau auf. Fehlt die Seite eines Titels, kommt das Bild als Standbild aus dem Video.
 - **Kategorien** – Knöpfe über den Kacheln filtern nach Genres wie Komödie, Drama, Krimi oder
   Thriller, dazu die Wahl zwischen Filmen und Serien. Ein Titel kann in mehreren Kategorien stehen,
   darum ist die Summe größer als die Zahl der Titel. Die Kategorien stammen von der Mediathek und
@@ -86,17 +88,22 @@ das Update unter Linux auch über `sudo apt upgrade`.
   außer den fehlenden oder den geladenen Titeln aus.
 - **Neue Folgen** – die gleichnamige Seite listet alle Serien, von denen du schon etwas geladen hast
   und die seit dem letzten Download neue Folgen bekommen haben, auch wenn sie nicht in der Vorschau
-  stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In Vorschau und Bibliothek markiert
+  stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In der Vorschau markiert
   ein kleines grünes „!“ dieselben Serien. Während der Suche zeigt die Seite, welche Serie gerade
   dran ist und wie weit es ist; ein Spinner in der Titelleiste zeigt es auf allen Seiten. Mit
   „Neue Folgen automatisch laden“ (Einstellungen) kommen sie von selbst in die Warteschlange, mit
   allen Sprachen und Untertiteln; gesucht wird beim Start und danach alle sechs Stunden.
-- **Meine Videos** – alles Geladene als Kacheln wie in einer Mediathek: oben „Weiterschauen“ und
-  „Zuletzt geladen“ zum seitlichen Blättern, darunter Serien und Filme von A bis Z. Eine Serie
+- **Meine Videos** – alles Geladene als Kacheln wie in einer Mediathek: oben „Weiterschauen“ zum
+  seitlichen Blättern, darunter jede Serie und jeder Film genau einmal, wahlweise von A bis Z oder
+  zuletzt geladen zuerst. Das Menü daneben filtert nach Kategorie, mit der Anzahl je Kategorie; die
+  Kategorien kommen aus der Vorschau, sonst von IMDb, und bleiben gespeichert. Eine Serie
   öffnet sich mit ihren Staffeln und Folgen; der große Knopf spielt die angefangene oder die nächste
   ungesehene Folge. Bilder kommen von der Mediathek, sonst als Standbild aus der Datei. Ein Balken
-  zeigt, wie weit eine Datei oder Serie geschaut ist („3 von 10 gesehen“). Die rechte Maustaste
-  markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm und verschiebt Filme,
+  zeigt, wie weit eine Datei oder Serie geschaut ist („3 von 10 gesehen“); jede angefangene Folge
+  nennt dazu den Anteil und die Restzeit („40 % · noch 25 min“). Auch in der Detailansicht der
+  Vorschau steht an geladenen Folgen „40 % gesehen“ oder „Gesehen“ statt nur „Geladen“. Die rechte Maustaste
+  markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm, wandelt nachträglich
+  nach AV1 um (eine Datei oder alle Folgen; was schon AV1 ist, bleibt) und verschiebt Filme,
   Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
   Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet.
 - **Ordner prüfen** – gleicht den Speicherort mit dem Verlauf ab: Verschobene Dateien bekommen ihren
@@ -106,37 +113,50 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Statistik** – Sehzeit insgesamt, der letzten 7 Tage und je Tag, Wochentag und Uhrzeit, Tage am
   Stück, die meistgesehenen Titel, was wann geladen wurde, die meistgeladenen Serien, der Platz auf
   der Festplatte, wie viel davon schon gesehen ist, und die größten Dateien. Sehzeit zählt nur im
-  eingebauten Player und nur, was wirklich lief; sie liegt in `~/.mediathek-downloader/sehzeit.tsv`
-  und bleibt, auch wenn die Datei gelöscht wird.
+  eingebauten Player und nur, was wirklich lief; sie liegt in `sehzeit.tsv` im Datenordner und
+  bleibt, auch wenn die Datei gelöscht wird.
 - **Player** – spielt die Dateien im Hauptfenster, auch AV1; im Vollbild verschwindet die
   Titelleiste. Er merkt sich, wo eine Datei aufgehört hat, macht dort weiter und startet am Ende die
   nächste Folge. Tonspur und Untertitel lassen sich während der Wiedergabe wechseln bzw. an- und
   ausschalten. Der Zoom blendet schwarze Balken aus: „Schwarze Balken ausblenden“ sucht per ffmpeg
   nach Balken, die fest im Bild sind, und füllt das Fenster mit dem Inhalt. Tasten: Leertaste
   Pause, ←/→ 10 Sekunden, ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
-  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück. Springen,
+  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück, ? oder F1
+  blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
-  Ab 95 % gilt eine Datei als gesehen. Der Stand liegt in `~/.mediathek-downloader/wiedergabe.tsv`.
+  Die Tooltips der Knöpfe nennen ihre Taste.
+  Gesprungen wird ohne Wartezeit zum nächstgelegenen Schlüsselbild; in AV1-Dateien dieses Programms
+  liegt alle 10 Sekunden eines, ein Sprung ist dort also 5 bis 15 Sekunden weit. Das Mausrad
+  verstellt die Zeitleiste nicht. Wählt man bei laufendem Video einen anderen Reiter, spielt es in
+  einem kleinen Fenster über allen anderen weiter (Bild im Bild); Doppelklick oder der Knopf in
+  dessen Leiste holt es zurück. Ab 95 % gilt eine Datei als gesehen. Der Stand liegt in
+  `wiedergabe.tsv` im Datenordner.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.
-- **Bibliothek** – alles Geladene nach Sendung, mit Größe, Datum, Abspielen und Ordner öffnen. Das
-  Lupensymbol zeigt die fehlenden Folgen einer Serie in der Vorschau, sofern sie dort steht.
+- **Tastenkürzel** – Strg+1 bis Strg+6 wählen die Reiter, Strg+Bild↑/↓ blättert durch sie, Strg+F
+  springt ins Suchfeld, F5 lädt die aktuelle Seite neu, F1 zeigt alle Kürzel. „Erste Schritte“ im
+  Menü erklärt den Ablauf in wenigen Sätzen.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
   dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei.
 - **Pause** – einzeln oder alle. Auch nach dem Beenden oder einem Absturz geht es an derselben
   Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick. Downloads und
-  Umwandlung lassen sich außerdem getrennt anhalten (Seite Downloads, „Steuerung“): Dann laden etwa
+  Umwandlung lassen sich außerdem getrennt anhalten (Seite Warteschlange, „Steuerung“): Dann laden etwa
   die Downloads weiter, während die Umwandlung stillsteht.
-- **Downloadliste** – oben steht, was gerade läuft, dann Fehlgeschlagenes, Wartendes und zuletzt
+- **Warteschlange** – oben steht, was gerade läuft, dann Fehlgeschlagenes, Wartendes und zuletzt
   Fertiges. Die Liste zeigt 100 Aufträge, „Weitere anzeigen“ holt die nächsten; so bleibt sie auch
   mit Tausenden Einträgen flüssig. „Fertige entfernen“ räumt Erledigtes weg, „Fehlgeschlagene
-  entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien.
+  entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien. Liegen dabei Reste auf der Platte,
+  fragt das Programm vorher nach und nennt ihre Größe, auch beim Entfernen eines einzelnen
+  Fehlschlags. Fehlermeldungen sagen, ob „Erneut versuchen“ hilft oder was sonst zu tun ist.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
-- **AV1** – auf Wunsch wandelt das Programm jedes Video nach dem Download um, mit den Einstellungen
-  des AV1-Converters. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
+- **AV1** – auf Wunsch („Platz sparen“ in den Einstellungen) wandelt das Programm jedes Video nach
+  dem Download um, mit den Einstellungen des AV1-Converters. Die Bildqualität ist in drei Stufen
+  wählbar (Gut, Sehr gut, Beste); „Eigene Werte“ zeigt die Qualitätswerte für Grafikkarte und
+  Prozessor. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
   schneidet es dabei ab; ffmpeg prüft dafür fünf Stellen im Video, und im Zweifel bleibt das Bild
-  ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei.
+  ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).
 - **Speicherort** – frei wählbar, Standard ist `~/Videos/Mediathek` (Windows: `Videos\Mediathek`).
@@ -144,8 +164,19 @@ das Update unter Linux auch über `sudo apt upgrade`.
   und werden nicht neu geladen; verkleinerte Titelbilder hält das Programm zusätzlich im Speicher,
   und hat ein Titel kein Bild, fragt es erst nach sieben Tagen wieder nach. Die Film- und
   Folgenlisten der Vorschau gelten sechs Stunden; der
-  Knopf „Vorschau neu laden“ holt sie sofort frisch. Der Ordner ist frei wählbar, Standard ist
-  `~/.mediathek-downloader/bilder`. Halbfertige Downloads (`.part`) bleiben beim Speicherort.
+  Knopf „Vorschau neu laden“ holt sie sofort frisch. Jede Anfrage an eine Mediathek oder an IMDb
+  geht nur einmal raus: Fragen zwei Teile des Programms gleichzeitig dasselbe, wartet der zweite auf
+  die Antwort des ersten, und was gerade fehlgeschlagen ist, wird zehn Minuten nicht wiederholt.
+  Halbfertige Downloads (`.part`) bleiben beim Speicherort.
+- **Programmdaten** – Einstellungen, Verlauf, Warteschlange, Protokoll und Zwischenspeicher liegen
+  zusammen in einem Ordner. In den Einstellungen lässt sich ein anderer Ordner wählen; darin
+  entsteht der Unterordner `Mediathek Downloader`, und alles zieht dorthin um, der Zwischenspeicher
+  im Hintergrund. Der Knopf „Standardordner“ holt alles zurück. Ohne Wahl liegt alles unter Windows im Installationsordner (`Daten`), unter Linux
+  in `~/.mediathek-downloader`, weil der Installationsordner `/usr` nicht beschreibbar ist. Welcher
+  Ordner gewählt ist, steht in `~/.config/mediathek-downloader/datenordner` (Windows:
+  `%LOCALAPPDATA%\mediathek-downloader\datenordner`). Wer bis 2.2 einen
+  eigenen Ordner für den Zwischenspeicher hatte, bekommt dort beim ersten Start den Datenordner;
+  aus dem alten Ordner ziehen nur die Dateien des Zwischenspeichers mit.
 
 ## Wo die Dateien landen
 
@@ -156,9 +187,10 @@ das Update unter Linux auch über `sudo apt upgrade`.
 
 Eine Folge gilt als geladen, sobald sie im Verlauf steht und die Datei noch da ist – egal in welcher
 Qualität oder an welchem Speicherort. Wird eine Datei verschoben, zeigt das Programm *Datei fehlt*;
-der Eintrag lässt sich in der Bibliothek entfernen, die Folge dann neu laden.
+„Ordner prüfen“ in „Meine Videos“ findet sie wieder oder nimmt den Eintrag aus dem Verlauf,
+die Folge lässt sich dann neu laden.
 
-Einstellungen, Warteschlange, Verlauf und Protokoll liegen in `~/.mediathek-downloader`.
+Einstellungen, Warteschlange, Verlauf und Protokoll liegen im Datenordner (siehe „Programmdaten“).
 
 ## Terminal-Version
 
@@ -185,7 +217,7 @@ der Oberfläche nutzt die Terminal-Version nicht, den Verlauf schon.
 
 | | GPU (Standard) | CPU |
 |---|---|---|
-| Encoder | `av1_vaapi`, Qualität 64; Windows: `av1_nvenc`, `av1_qsv` oder `av1_amf` | SVT-AV1, Preset 6, RF 35 |
+| Encoder („Umwandlung mit“) | `av1_vaapi`, Qualität 64 („Sehr gut“); Windows: `av1_nvenc`, `av1_qsv` oder `av1_amf` | SVT-AV1, Preset 6, RF 35 |
 | Tempo | sehr schnell | sehr viel langsamer |
 | Ton, Untertitel | unverändert | unverändert |
 
@@ -218,7 +250,7 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   ARTE und SRF stehen Staffel und Folge oft nur als „(3/6)“ im Titel.
 - **NRK** liefert nur Serien, und nur Folgen, die die NRK weltweit freigibt (meist eigene
   Produktionen), auf Norwegisch. Die Liste kommt von den Serien der NRK-Startseite; über die Suche
-  der Terminal-Version findet sich mehr.
+  (Enter im Suchfeld) findet sich mehr.
 - **ARTE intl.** fasst die anderen Sprachfassungen von ARTE zusammen; Titel und Untertitel sind in
   der jeweiligen Sprache.
 - **Private Sender und Bezahldienste** gibt es nicht: Sie stehen nicht in der Datenquelle, ihre
@@ -230,8 +262,6 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   Bei ARTE und SRF kommt das Bild nur von der Seite; ohne Seite bleibt der Titel ohne Bild.
 - **Titellisten** kommen von [MediathekViewWeb](https://mediathekviewweb.de), nicht von den Sendern.
   Ist dieser Dienst nicht erreichbar, gibt es keine Titel.
-- **Freie Suche** gibt es nur in der Terminal-Version. Die Vorschau zeigt die neuesten Titel, was
-  dort nicht steht, findet nur `mediathek-downloader-cli`.
 - **Windows:** Der Papierkorb, der Player und die GPU-Umwandlung laufen über die Windows-Fassungen
   von GTK, GStreamer und ffmpeg. Ohne NVIDIA-, Intel- oder AMD-Karte mit AV1-Encoder übernimmt die
   CPU. Die Fenster sehen nach GTK aus, nicht nach Windows.

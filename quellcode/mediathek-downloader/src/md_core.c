@@ -53,6 +53,7 @@
 #ifdef G_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <io.h>
+#include <sys/utime.h>
 #include <wchar.h>
 #include <windows.h>
 #define localtime_r(t, tm) localtime_s(tm, t)
@@ -64,6 +65,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utime.h>
 #endif
 
 #include "md_core.h"
@@ -129,7 +131,18 @@ static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define QUEUE_HEADER "#mediathek-downloader-warteschlange 1"
 #define QUEUE_HEADER_OLD "#zdf-downloader-warteschlange 1"
 #define OLD_APP_DIR ".zdf-downloader"
+#define LEGACY_APP_DIR ".mediathek-downloader"  /* bis 2.2: immer im Benutzerordner */
+#define DATA_DIR_NAME "Mediathek Downloader"    /* Unterordner im gewählten Ordner */
+#define CACHE_DIR_NAME "Zwischenspeicher"
+#define OLD_CACHE_DIR_NAME "bilder"             /* bis 2.2 */
+#define POINTER_DIR "mediathek-downloader"      /* in ~/.config bzw. %LOCALAPPDATA% */
+#define POINTER_FILE "datenordner"              /* gewählter Ordner, fehlt = Standard */
 #define HISTORY_FILE "verlauf.tsv"
+/* Fehlertexte, die mehrfach vorkommen; sie sagen auch, was zu tun ist */
+#define UNREACHABLE_TEXT "Der Server ist nicht erreichbar. Internetverbindung prüfen und erneut " \
+                         "versuchen."
+#define FFMPEG_MISSING_TEXT "Das Programm ist unvollständig installiert (ffmpeg fehlt). Bitte " \
+                            "neu installieren."
 #define AUDIO_BYTES_PER_SECOND 16000    /* Zusatzspur: AAC 128 kbit/s */
 #define VARIANT_MAX_DIFFERENCE 30       /* Sekunden: so nah muss die Länge der Fassungen sein */
 
@@ -261,14 +274,16 @@ static GMutex g_log_lock;
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
  * ------------------------------------------------------------------------- */
+/* Beim Umzug ändern sich die Pfade; die alten Zeichenketten bleiben gültig, andere Threads
+ * können sie gerade benutzen */
 const char *md_app_dir(void)
 {
-    return g_app_dir;
+    return g_atomic_pointer_get(&g_app_dir);
 }
 
 const char *md_log_path(void)
 {
-    return g_log_path;
+    return g_atomic_pointer_get(&g_log_path);
 }
 
 /* Dezimalpunkt durch Komma ersetzen (Anzeige auf Deutsch) */
@@ -363,7 +378,7 @@ void md_log(const char *format, ...)
     localtime_r(&t, &tm);
     strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
     g_mutex_lock(&g_log_lock);
-    FILE *f = g_fopen(g_log_path, "a");
+    FILE *f = g_fopen(md_log_path(), "a");
     if (f) {
         fprintf(f, "%s  %s\n", stamp, text);
         fclose(f);
@@ -1045,15 +1060,10 @@ static bool parse_response(const char *text, GPtrArray *out, int *total, char **
     return j.ok;
 }
 
-static GMutex cover_lock;
-static char *cover_dir;         /* NULL = Standardordner */
-
 /* Aktueller Ordner des Zwischenspeichers */
 static char *cache_dir(void)
 {
-    g_mutex_lock(&cover_lock);
-    char *dir = cover_dir ? g_strdup(cover_dir) : md_default_cover_dir();
-    g_mutex_unlock(&cover_lock);
+    char *dir = g_build_filename(md_app_dir(), CACHE_DIR_NAME, NULL);
     g_mkdir_with_parents(dir, 0755);
     return dir;
 }
@@ -1069,6 +1079,54 @@ static char *cache_file(const char *key, const char *suffix)
     g_free(hash);
     g_free(name);
     return path;
+}
+
+/* ---------------------------------------------------------------------------
+ * Jede Anfrage nur einmal: Will ein zweiter Thread dieselbe Datei des Zwischenspeichers füllen,
+ * während der erste noch lädt, wartet er und liest danach das Ergebnis. Was gerade
+ * fehlgeschlagen ist, wird FAILED_RETRY_SECONDS lang nicht noch einmal gefragt.
+ * ------------------------------------------------------------------------- */
+#define FAILED_RETRY_SECONDS 600
+
+static GMutex flight_lock;
+static GCond flight_done;
+static GHashTable *flights;     /* Schlüssel, die gerade geladen werden */
+static GHashTable *failures;    /* Schlüssel -> Zeitpunkt des letzten Fehlschlags (Sekunden) */
+
+/* -> true, wenn key eben erst fehlgeschlagen ist (dann nicht ins Netz) */
+static bool flight_begin(const char *key)
+{
+    g_mutex_lock(&flight_lock);
+    if (!flights) {
+        flights = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        failures = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    }
+    while (g_hash_table_contains(flights, key)) g_cond_wait(&flight_done, &flight_lock);
+    g_hash_table_add(flights, g_strdup(key));
+    gint64 failed = GPOINTER_TO_SIZE(g_hash_table_lookup(failures, key));
+    bool recent = failed && g_get_monotonic_time() / G_USEC_PER_SEC - failed < FAILED_RETRY_SECONDS;
+    g_mutex_unlock(&flight_lock);
+    return recent;
+}
+
+static void flight_end(const char *key, bool failed)
+{
+    g_mutex_lock(&flight_lock);
+    g_hash_table_remove(flights, key);
+    if (failed)
+        g_hash_table_replace(failures, g_strdup(key),
+                             GSIZE_TO_POINTER(MAX(g_get_monotonic_time() / G_USEC_PER_SEC, 1)));
+    else
+        g_hash_table_remove(failures, key);
+    g_cond_broadcast(&flight_done);
+    g_mutex_unlock(&flight_lock);
+}
+
+/* Datei seit since (Unix-Zeit) geschrieben? Dann hat sie ein anderer Thread gerade geholt. */
+static bool written_since(const char *path, time_t since)
+{
+    GStatBuf st;
+    return g_stat(path, &st) == 0 && st.st_mtime >= since;
 }
 
 static char *search_cache_path(const char *body)
@@ -1108,10 +1166,21 @@ static bool fetch_page(const char *channel, const char *text, const char *field,
     /* Antworten für die Vorschau werden aufgehoben, damit der Start ohne Netz auskommt */
     char *saved = cache != MD_CACHE_OFF ? search_cache_path(body->str) : NULL;
     int rc = 0;
-    if (cache != MD_CACHE_USE || !search_cache_read(saved, &reply)) {
-        rc = run_capture(argv, &reply, &messages);
-        if (saved && rc == 0 && reply) g_file_set_contents(saved, reply, -1, NULL);
+    time_t asked = time(NULL);
+    bool failed_before = saved && flight_begin(saved), tried = false;
+    /* auch ein Neuladen muss nicht doppelt laufen, wenn ein anderer Thread gerade geholt hat */
+    bool shared = saved && written_since(saved, asked) &&
+                  g_file_get_contents(saved, &reply, NULL, NULL);
+    if (!shared && (cache != MD_CACHE_USE || !search_cache_read(saved, &reply))) {
+        if (failed_before) {
+            rc = 1;
+        } else {
+            tried = true;
+            rc = run_capture(argv, &reply, &messages);
+            if (saved && rc == 0 && reply) g_file_set_contents(saved, reply, -1, NULL);
+        }
     }
+    if (saved) flight_end(saved, tried && rc != 0);
     g_free(saved);
     bool ok = false;
     if (rc == 0 && reply) {
@@ -1594,10 +1663,12 @@ static char *json_pick_image(const JsonNode *list, int width)
 static char *fetch_url(const char *url, int max_age, MdCache cache)
 {
     char *saved = cache_file(url, ".api"), *reply = NULL;
+    time_t asked = time(NULL);
+    bool failed_before = flight_begin(saved), failed = false;
     GStatBuf st;
-    bool fresh = cache != MD_CACHE_REFRESH && g_stat(saved, &st) == 0 &&
-                 (max_age < 0 || time(NULL) - st.st_mtime < max_age);
-    if (!fresh || !g_file_get_contents(saved, &reply, NULL, NULL)) {
+    bool fresh = (cache != MD_CACHE_REFRESH || written_since(saved, asked)) &&
+                 g_stat(saved, &st) == 0 && (max_age < 0 || time(NULL) - st.st_mtime < max_age);
+    if ((!fresh || !g_file_get_contents(saved, &reply, NULL, NULL)) && !failed_before) {
         char *messages = NULL;
         char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "60", "-A", USER_AGENT, "--url",
                         (char *)url, NULL};
@@ -1606,9 +1677,11 @@ static char *fetch_url(const char *url, int max_age, MdCache cache)
         } else {
             md_log("Nicht erreichbar: %s", url);
             g_clear_pointer(&reply, g_free);
+            failed = true;
         }
         g_free(messages);
     }
+    flight_end(saved, failed);
     g_free(saved);
     return reply;
 }
@@ -2078,7 +2151,9 @@ static void history_add(const Job *j)
     h->e.season = j->season;
     h->e.episode = j->episode;
     h->e.size = MAX(file_size(h->e.path), 0);
-    h->e.finished = g_get_real_time() / G_USEC_PER_SEC;
+    /* nachträglich umgewandelt: geladen wurde die Datei schon früher */
+    const History *before = *j->url ? NULL : g_hash_table_lookup(q.history, j->key);
+    h->e.finished = before ? before->e.finished : g_get_real_time() / G_USEC_PER_SEC;
     g_free(result);
 
     GString *line = g_string_new(NULL);
@@ -2699,7 +2774,25 @@ static char *page_gone_info(const char *website)
 
 /* Merkzettel zur Seite website: Bildadresse, FSK, danach je Zeile eine Kategorie.
  * Einmal geholt bleibt er liegen. NULL = Seite nicht erreichbar. */
+static char *page_info_fetch(const char *website, bool *failed);
+
 static char *page_info(const char *website)
+{
+    char *key = cache_file(website, ".info");
+    bool failed = flight_begin(key);
+    char *info = NULL;
+    if (!failed) {
+        info = page_info_fetch(website, &failed);
+    } else {
+        g_file_get_contents(key, &info, NULL, NULL);    /* ältere Angaben gelten weiter */
+        failed = false;                                 /* nicht verlängern */
+    }
+    flight_end(key, failed);
+    g_free(key);
+    return info;
+}
+
+static char *page_info_fetch(const char *website, bool *failed)
 {
     if (g_str_has_prefix(website, NETZKINO_PAGE) ||     /* schon mit der Filmliste gespeichert */
         g_str_has_prefix(website, NRK_PAGE)) {
@@ -2731,6 +2824,7 @@ static char *page_info(const char *website)
         g_file_set_contents(path, info, -1, NULL);
     } else if (rc != 0) {               /* vorübergehend: beim nächsten Start neu versuchen */
         md_log("Seite nicht geladen (curl %d%s): %s", rc, code ? code : "", website);
+        *failed = true;
     } else if (reply) {
         GString *fresh = g_string_new(NULL);
         if (ard) ard_page_info(reply, fresh);
@@ -2798,14 +2892,6 @@ void md_page_info_free(MdPageInfo *info)
     g_free(info);
 }
 
-void md_set_cover_dir(const char *dir)
-{
-    g_mutex_lock(&cover_lock);
-    g_free(cover_dir);
-    cover_dir = g_strdup(dir);
-    g_mutex_unlock(&cover_lock);
-}
-
 char *md_video_frame(const char *path)
 {
     GStatBuf st;
@@ -2832,10 +2918,6 @@ char *md_video_frame(const char *path)
     return NULL;
 }
 
-char *md_default_cover_dir(void)
-{
-    return g_build_filename(md_app_dir(), "bilder", NULL);
-}
 
 /* Die Seite nennt kein Bild: Standbild aus dem Video holen. Nicht bei Streams: ffmpeg lädt dort
  * jedes Teilstück bis zur Sprungmarke und belegt minutenlang einen der Bild-Threads. */
@@ -2863,7 +2945,20 @@ static bool no_cover_marked(const char *marker)
                                                   : PAGE_RECHECK_SECONDS);
 }
 
+static char *cover_file(const char *website, const char *video);
+
 char *md_cover_file(const char *website, const char *video)
+{
+    char *key = cache_file(website, ".jpg");
+    if (file_size(key) > 0) return key;
+    flight_begin(key);          /* Fehlschläge merkt sich der Merker .keinbild */
+    char *path = cover_file(website, video);
+    flight_end(key, false);
+    g_free(key);
+    return path;
+}
+
+static char *cover_file(const char *website, const char *video)
 {
     char *path = cache_file(website, ".jpg");
     if (file_size(path) > 0) return path;
@@ -2985,6 +3080,13 @@ static char *imdb_lookup(const char *name, bool is_film, int *year)
         g_free(saved);
         return known;
     }
+    /* Vorschau, Bewertung und "Meine Videos" fragen oft gleichzeitig nach demselben Titel */
+    bool failed_before = flight_begin(saved);
+    if (failed_before || imdb_cache_read(saved, &known, year)) {
+        flight_end(saved, failed_before);
+        g_free(saved);
+        return known;
+    }
     /* Untertitel wie "- Tod im Schnee" kennt IMDb meist nicht */
     char *query = g_strdup(name);
     char *cut = strstr(query, " - ");
@@ -2995,12 +3097,14 @@ static char *imdb_lookup(const char *name, bool is_film, int *year)
     char *api = g_strdup_printf(IMDB_API "%s.json?includeVideos=0", escaped);
     char *argv[] = {CURL_CMD, "-sS", "-f", "-L", "-m", "15", "-A", USER_AGENT, api, NULL};
     char *reply = NULL, *messages = NULL, *id = NULL;
-    if (run_capture(argv, &reply, &messages) == 0 && reply) {
+    bool answered = run_capture(argv, &reply, &messages) == 0 && reply;
+    if (answered) {
         id = imdb_pick(reply, name, is_film, year);
         char *line = id ? g_strdup_printf("%s %d", id, year ? *year : 0) : g_strdup("-");
         g_file_set_contents(saved, line, -1, NULL);
         g_free(line);
     }
+    flight_end(saved, !answered);
     g_free(saved);
     g_free(query);
     g_free(lower);
@@ -3196,7 +3300,7 @@ static void extras_from_text(Job *j, const char *text)
 
 static char *queue_path(void)
 {
-    return g_build_filename(g_app_dir, "warteschlange.tsv", NULL);
+    return g_build_filename(md_app_dir(), "warteschlange.tsv", NULL);
 }
 
 /* Warteschlange als Text (q.lock gehalten) */
@@ -3335,6 +3439,12 @@ static Job *job_by_id(guint id)
     return NULL;
 }
 
+/* Auftrag ohne Download: eine schon geladene Datei nachträglich nach AV1 (md_queue_convert) */
+static bool is_reconvert(const Job *j)
+{
+    return !*j->url;
+}
+
 /* Muss nach dem Download noch ffmpeg ran? */
 static bool needs_processing(const Job *j)
 {
@@ -3364,6 +3474,30 @@ static void remove_partial_files(const Job *j)
     remove_extra_files(j);
     g_free(part);
     g_free(tmp);
+}
+
+static gint64 file_bytes(const char *path)
+{
+    GStatBuf st;
+    return g_stat(path, &st) == 0 ? (gint64)st.st_size : 0;
+}
+
+/* Größe der Dateien, die remove_partial_files löschen würde */
+static gint64 partial_bytes(const Job *j)
+{
+    char *part = g_strconcat(j->target, ".part", NULL), *tmp = temp_path(j->target);
+    gint64 bytes = file_bytes(part) + file_bytes(tmp);
+    for (guint i = 0; i < j->extras->len; i++) {
+        const Extra *e = j->extras->pdata[i];
+        char *path = extra_path(j->target, i, e->subtitle);
+        char *extra_part = g_strconcat(path, ".part", NULL);
+        bytes += file_bytes(path) + file_bytes(extra_part);
+        g_free(path);
+        g_free(extra_part);
+    }
+    g_free(part);
+    g_free(tmp);
+    return bytes;
 }
 
 /* Zustand setzen (q.lock gehalten); das Verzeichnis offener Aufträge gilt danach nicht mehr */
@@ -3457,11 +3591,12 @@ static gint64 remote_size(const char *url, char **error)
     }
     g_strfreev(lines);
     if (rc != 0 || status == 0)
-        *error = g_strdup("Der Server ist nicht erreichbar.");
+        *error = g_strdup(UNREACHABLE_TEXT);
     else if (status == 403)
         *error = g_strdup("Zugriff verweigert – das Video ist nur aus Deutschland abrufbar.");
     else if (status == 404 || status == 410)
-        *error = g_strdup("Das Video ist nicht mehr in der Mediathek.");
+        *error = g_strdup("Das Video ist nicht mehr in der Mediathek. Erneut versuchen hilft "
+                          "nicht, bitte aus der Liste entfernen.");
     else if (status != 200 || size <= 0)
         *error = g_strdup_printf("Unerwartete Antwort des Servers (HTTP %d).", status);
     g_free(out);
@@ -3582,7 +3717,8 @@ static bool download_file(Job *j, const char *url, const char *path, gint64 size
 
         GPid pid = start_curl(url, part, rate);
         if (!pid) {
-            *error = g_strdup("curl lässt sich nicht starten.");
+            *error = g_strdup("Das Programm ist unvollständig installiert (curl fehlt). Bitte "
+                              "neu installieren.");
             break;
         }
         int rc = watch_curl(j, pid, part, rate, base);
@@ -3595,7 +3731,8 @@ static bool download_file(Job *j, const char *url, const char *path, gint64 size
             continue;
         }
         if (rc == 23) {
-            *error = g_strdup("Die Datei lässt sich nicht schreiben (Laufwerk voll?).");
+            *error = g_strdup("Die Datei lässt sich nicht schreiben. Platz auf dem Laufwerk "
+                              "prüfen und erneut versuchen.");
             break;
         }
         if (current > progress_mark) failures = 0;  /* es ging voran: neue Versuche */
@@ -3711,8 +3848,9 @@ static char *hls_fetch(const char *url, char **error)
     int rc = run_capture(argv, &out, NULL);
     if (rc == 0 && out && g_str_has_prefix(out, "#EXTM3U")) return out;
     g_free(out);
-    *error = g_strdup(rc == 22 ? "Das Video ist nicht mehr abrufbar oder aus Deutschland gesperrt."
-                               : "Der Server ist nicht erreichbar.");
+    *error = g_strdup(rc == 22 ? "Das Video ist nicht mehr abrufbar oder aus Deutschland "
+                                 "gesperrt. Erneut versuchen hilft meist nicht."
+                               : UNREACHABLE_TEXT);
     return NULL;
 }
 
@@ -3867,7 +4005,7 @@ static int watch_hls(Job *j, GPtrArray *argv, const char *part, double duration,
     if (!g_spawn_async_with_pipes(NULL, (char **)argv->pdata, NULL,
                                   G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, child_setup,
                                   NULL, &pid, NULL, &out_fd, &err_fd, NULL)) {
-        *messages = g_strdup("ffmpeg lässt sich nicht starten.");
+        *messages = g_strdup(FFMPEG_MISSING_TEXT);
         return 1;
     }
     adopt_child(pid, false);
@@ -4283,7 +4421,10 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
     GPtrArray *metadata = g_ptr_array_new_with_free_func(g_free);
     args_add(maps, (const char *const[]){"-map", "0:v:0", NULL});
     int inputs = 1, audio = 0, subtitles = 0;
-    if (!j->skip_main_audio) {
+    if (is_reconvert(j)) {
+        /* die Spuren sind schon in der Datei und behalten ihre Angaben */
+        args_add(maps, (const char *const[]){"-map", "0:a?", "-map", "0:s?", NULL});
+    } else if (!j->skip_main_audio) {
         args_add(maps, (const char *const[]){"-map", "0:a?", NULL});
         add_track_metadata(metadata, 'a', audio++, j->main_label, j->main_lang);
     }
@@ -4346,7 +4487,7 @@ static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *crop, c
     if (!g_spawn_async_with_pipes(NULL, argv, NULL,
                                   G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD, child_setup,
                                   GINT_TO_POINTER(1), &pid, NULL, &out_fd, &err_fd, NULL)) {
-        *messages = g_strdup("ffmpeg lässt sich nicht starten.");
+        *messages = g_strdup(FFMPEG_MISSING_TEXT);
         g_ptr_array_free(command, TRUE);
         return 1;
     }
@@ -4421,6 +4562,17 @@ static char *tracks_note(const Job *j)
                            subtitles, missing ? " (nicht alle verfügbar)" : "");
 }
 
+/* <Name>.mkv -> <Name> (Original).mkv; false bei Fehler */
+static bool keep_as_original(const char *path)
+{
+    char *stem = path_stem(path), *backup = g_strconcat(stem, " (Original)",
+                                                        path + strlen(stem), NULL);
+    bool ok = g_rename(path, backup) == 0;
+    g_free(stem);
+    g_free(backup);
+    return ok;
+}
+
 /* Worker: Spuren zusammenführen und auf Wunsch nach AV1 umwandeln; Ergebnis prüfen */
 static gpointer convert_thread(gpointer data)
 {
@@ -4430,10 +4582,17 @@ static gpointer convert_thread(gpointer data)
     double duration = 0;
     bool done = false, interrupted = false, copy = !j->convert, av1_useless = false;
 
-    if (!media_info(j->target, &codec, &duration))
+    if (!media_info(j->target, &codec, &duration)) {
         error = g_strdup("Die heruntergeladene Datei ist nicht lesbar.");
-    else if (!copy && (crop = crop_filter(j->target, duration)))
+    } else if (is_reconvert(j) && !strcmp(codec, "av1")) {
+        note = g_strdup("Ist schon AV1 – nichts zu tun");
+        done = true;
+    } else if (!copy && (crop = crop_filter(j->target, duration))) {
         md_log("Schwarze Balken werden abgeschnitten (%s): %s", crop, j->title);
+    }
+    /* eine MKV-Datei heißt nach der Umwandlung wie vorher; das Original bekommt dann einen
+     * anderen Namen oder geht */
+    bool same_name = !strcmp(result, j->target);
     while (!error && !done && !interrupted) {
         g_mutex_lock(&q.lock);
         j->merging = copy;
@@ -4469,8 +4628,11 @@ static gpointer convert_thread(gpointer data)
                 av1_useless = true;
                 continue;
             }
-            note = g_strdup("AV1 wäre nicht kleiner – die MP4-Datei bleibt");
+            note = g_strdup(is_reconvert(j) ? "AV1 wäre nicht kleiner – die Datei bleibt"
+                                             : "AV1 wäre nicht kleiner – die MP4-Datei bleibt");
             done = true;
+        } else if (same_name && j->keep_original && !keep_as_original(j->target)) {
+            error = g_strdup("Das Original lässt sich nicht umbenennen.");
         } else if (g_rename(tmp, result) != 0) {
             error = g_strdup("Das Ergebnis lässt sich nicht ablegen.");
         } else {
@@ -4487,7 +4649,7 @@ static gpointer convert_thread(gpointer data)
             g_free(tracks);
             g_free(after);
             /* ohne AV1 steckt die MP4-Datei vollständig in der MKV-Datei */
-            if (!j->keep_original || !j->convert) g_unlink(j->target);
+            if (!same_name && (!j->keep_original || !j->convert)) g_unlink(j->target);
             remove_extra_files(j);
             done = true;
         }
@@ -4575,22 +4737,300 @@ static gpointer dispatcher_thread(gpointer data)
 /* ---------------------------------------------------------------------------
  * Öffentliche Schnittstelle
  * ------------------------------------------------------------------------- */
-/* Bis Version 1.2 hieß das Programm ZDF-Downloader: Verlauf, Warteschlange und Cache mitnehmen */
-static void adopt_old_app_dir(void)
+/* --- Datenordner -----------------------------------------------------------
+ * Einstellungen, Verlauf, Warteschlange, Protokoll und Zwischenspeicher liegen zusammen in einem
+ * Ordner: "<gewählter Ordner>/Mediathek Downloader". Ohne Wahl unter Windows im
+ * Installationsordner ("…\Mediathek Downloader\Daten"); unter Linux ist der Installationsordner
+ * /usr nicht beschreibbar, dort bleibt es ~/.mediathek-downloader. Welcher Ordner gewählt ist,
+ * steht als einziges außerhalb: in ~/.config/mediathek-downloader/datenordner.
+ * ------------------------------------------------------------------------- */
+static char *g_data_parent;     /* gewählter Ordner, NULL = Standard */
+static char *g_data_problem;    /* gewählter Ordner war beim Start nicht erreichbar */
+
+static char *pointer_path(void)
 {
-    char *old = g_build_filename(g_get_home_dir(), OLD_APP_DIR, NULL);
-    if (g_file_test(old, G_FILE_TEST_IS_DIR) && !g_file_test(g_app_dir, G_FILE_TEST_EXISTS))
-        g_rename(old, g_app_dir);
-    g_free(old);
+    return g_build_filename(g_get_user_config_dir(), POINTER_DIR, POINTER_FILE, NULL);
+}
+
+static char *legacy_app_dir(void)
+{
+    return g_build_filename(g_get_home_dir(), LEGACY_APP_DIR, NULL);
+}
+
+char *md_default_data_dir(void)
+{
+#ifdef G_OS_WIN32
+    char *install = g_win32_get_package_installation_directory_of_module(NULL);
+    if (install) {
+        char *dir = g_build_filename(install, "Daten", NULL);
+        g_free(install);
+        return dir;
+    }
+#endif
+    return legacy_app_dir();
+}
+
+const char *md_data_parent(void)
+{
+    return g_atomic_pointer_get(&g_data_parent);
+}
+
+const char *md_data_problem(void)
+{
+    return g_data_problem;
+}
+
+static char *data_dir_for(const char *parent)
+{
+    return parent && *parent ? g_build_filename(parent, DATA_DIR_NAME, NULL)
+                             : md_default_data_dir();
+}
+
+/* Datei kopieren, samt Änderungszeit (der Zwischenspeicher prüft daran, wie alt etwas ist) */
+static bool copy_file(const char *from, const char *to)
+{
+    GStatBuf st;
+    FILE *in = g_fopen(from, "rb");
+    char *tmp = g_strconcat(to, ".part", NULL);
+    FILE *out = in ? g_fopen(tmp, "wb") : NULL;
+    bool ok = in && out && g_stat(from, &st) == 0;
+    char buffer[65536];
+    size_t n;
+    while (ok && (n = fread(buffer, 1, sizeof buffer, in)) > 0) ok = fwrite(buffer, 1, n, out) == n;
+    ok &= in && !ferror(in);
+    if (in) fclose(in);
+    if (out) ok &= fclose(out) == 0;
+    if (ok) {
+        struct utimbuf times = {st.st_atime, st.st_mtime};
+        g_utime(tmp, &times);
+        ok = g_rename(tmp, to) == 0;
+    }
+    if (!ok) g_unlink(tmp);
+    g_free(tmp);
+    return ok;
+}
+
+/* Datei oder Ordner verschieben, auch auf ein anderes Laufwerk. Was im Ziel schon liegt, bleibt
+ * (es ist neuer); die Quelle wird dann gelöscht. -> false, wenn etwas nicht ging */
+static bool move_tree(const char *from, const char *to)
+{
+    if (!g_file_test(from, G_FILE_TEST_EXISTS)) return true;
+    if (g_file_test(from, G_FILE_TEST_IS_DIR)) {
+        g_mkdir_with_parents(to, 0755);
+        GDir *dir = g_dir_open(from, 0, NULL);
+        bool ok = dir != NULL;
+        const char *name;
+        while (dir && (name = g_dir_read_name(dir))) {
+            char *a = g_build_filename(from, name, NULL), *b = g_build_filename(to, name, NULL);
+            ok &= move_tree(a, b);
+            g_free(a);
+            g_free(b);
+        }
+        if (dir) g_dir_close(dir);
+        g_rmdir(from);
+        return ok;
+    }
+    if (g_file_test(to, G_FILE_TEST_EXISTS)) return g_unlink(from) == 0;
+    if (g_rename(from, to) == 0) return true;
+    return copy_file(from, to) && g_unlink(from) == 0;
+}
+
+/* Liegt in dir etwas vom Programm (Einstellungen, Verlauf …)? */
+static bool has_app_files(const char *dir)
+{
+    static const char *const FILES[] = {"einstellungen.ini", "verlauf.tsv", "warteschlange.tsv"};
+    bool found = false;
+    for (size_t i = 0; i < G_N_ELEMENTS(FILES) && !found; i++) {
+        char *path = g_build_filename(dir, FILES[i], NULL);
+        found = g_file_test(path, G_FILE_TEST_EXISTS);
+        g_free(path);
+    }
+    return found;
+}
+
+/* Name einer Datei des Zwischenspeichers (Prüfsumme plus Endung, IMDb-Daten)? Nur solche nimmt
+ * md_adopt_cache aus einem fremden Ordner mit. */
+static bool is_cache_name(const char *name)
+{
+    static GRegex *pattern;
+    if (g_once_init_enter(&pattern)) {
+        GRegex *re = g_regex_new("^([0-9a-f]{40}\\.(info|api|suche|jpg|bild\\.jpg|keinbild|imdb)"
+                                 "(\\.part)?|imdb-(bewertungen|kategorien)\\.tsv)$", 0, 0, NULL);
+        g_once_init_leave(&pattern, re);
+    }
+    return g_regex_match(pattern, name, 0, NULL);
+}
+
+static gpointer adopt_cache_thread(gpointer data)
+{
+    char **dirs = data;         /* alter Ordner, neuer Ordner */
+    g_mkdir_with_parents(dirs[1], 0755);
+    GDir *dir = g_dir_open(dirs[0], 0, NULL);
+    const char *name;
+    int moved = 0;
+    while (dir && (name = g_dir_read_name(dir))) {
+        if (!is_cache_name(name)) continue;
+        char *a = g_build_filename(dirs[0], name, NULL), *b = g_build_filename(dirs[1], name, NULL);
+        moved += move_tree(a, b);
+        g_free(a);
+        g_free(b);
+    }
+    if (dir) g_dir_close(dir);
+    if (moved) md_log("Zwischenspeicher umgezogen: %d Dateien aus %s", moved, dirs[0]);
+    g_rmdir(dirs[0]);           /* nur, wenn er jetzt leer ist */
+    g_strfreev(dirs);
+    return NULL;
+}
+
+void md_adopt_cache(const char *old_dir)
+{
+    char *now = cache_dir();
+    if (old_dir && *old_dir && strcmp(old_dir, now) && g_file_test(old_dir, G_FILE_TEST_IS_DIR)) {
+        char **dirs = g_new0(char *, 3);
+        dirs[0] = g_strdup(old_dir);
+        dirs[1] = g_strdup(now);
+        g_thread_unref(g_thread_new("zwischenspeicher", adopt_cache_thread, dirs));
+    }
+    g_free(now);
+}
+
+static gpointer move_cache_thread(gpointer data)
+{
+    char **dirs = data;
+    if (!move_tree(dirs[0], dirs[1])) md_log("Zwischenspeicher nicht ganz umgezogen: %s", dirs[0]);
+    char *old_data = g_path_get_dirname(dirs[0]);
+    g_rmdir(old_data);          /* der alte Datenordner, nur wenn er jetzt leer ist */
+    g_free(old_data);
+    g_strfreev(dirs);
+    return NULL;
+}
+
+/* Pfade umstellen (die alten Zeichenketten bleiben gültig, siehe md_app_dir; die Liste hält
+ * sie erreichbar, damit sie nicht als Leck gelten) */
+static GPtrArray *g_old_paths;
+
+static void replace_path(char **slot, char *value)
+{
+    char *old = g_atomic_pointer_exchange(slot, value);
+    if (!old) return;
+    if (!g_old_paths) g_old_paths = g_ptr_array_new();
+    g_ptr_array_add(g_old_paths, old);
+}
+
+static void use_data_dir(const char *parent, const char *dir)
+{
+    replace_path(&g_data_parent, parent && *parent ? g_strdup(parent) : NULL);
+    replace_path(&g_app_dir, g_strdup(dir));
+    replace_path(&g_log_path, g_build_filename(dir, "protokoll.log", NULL));
+}
+
+bool md_set_data_parent(const char *parent, char **error)
+{
+    if (parent && !*parent) parent = NULL;
+    char *from = g_strdup(md_app_dir()), *to = data_dir_for(parent);
+    if (!strcmp(from, to)) {
+        g_free(from);
+        g_free(to);
+        return true;
+    }
+    if (g_str_has_prefix(to, from) && to[strlen(from)] == G_DIR_SEPARATOR) {
+        *error = g_strdup("Der neue Ordner liegt im bisherigen Datenordner.");
+        g_free(from);
+        g_free(to);
+        return false;
+    }
+    if (g_mkdir_with_parents(to, 0755) != 0) {
+        *error = g_strdup_printf("%s lässt sich nicht anlegen: %s", to, g_strerror(errno));
+        g_free(from);
+        g_free(to);
+        return false;
+    }
+    /* erst alles außer dem Zwischenspeicher, damit Verlauf und Warteschlange nicht in zwei
+     * Ordnern weiterwachsen; der Zwischenspeicher kann groß sein und folgt im Hintergrund */
+    g_mutex_lock(&q.lock);
+    g_mutex_lock(&g_log_lock);
+    bool ok = true;
+    GDir *dir = g_dir_open(from, 0, NULL);
+    const char *name;
+    while (dir && (name = g_dir_read_name(dir))) {
+        if (!strcmp(name, CACHE_DIR_NAME)) continue;
+        char *a = g_build_filename(from, name, NULL), *b = g_build_filename(to, name, NULL);
+        ok &= move_tree(a, b);
+        g_free(a);
+        g_free(b);
+    }
+    if (dir) g_dir_close(dir);
+    use_data_dir(parent, to);
+    g_mutex_unlock(&g_log_lock);
+    g_mutex_unlock(&q.lock);
+
+    char **dirs = g_new0(char *, 3);
+    dirs[0] = g_build_filename(from, CACHE_DIR_NAME, NULL);
+    dirs[1] = g_build_filename(to, CACHE_DIR_NAME, NULL);
+    g_thread_unref(g_thread_new("zwischenspeicher", move_cache_thread, dirs));
+
+    char *pointer = pointer_path();
+    if (parent) {
+        char *pointer_dir = g_path_get_dirname(pointer);
+        g_mkdir_with_parents(pointer_dir, 0755);
+        g_free(pointer_dir);
+        ok &= g_file_set_contents(pointer, parent, -1, NULL);
+    } else {
+        g_unlink(pointer);
+    }
+    g_free(pointer);
+    g_clear_pointer(&g_data_problem, g_free);
+    md_log("Datenordner umgezogen: %s -> %s", from, to);
+    if (!ok) *error = g_strdup("Nicht alle Dateien ließen sich verschieben.");
+    g_free(from);
+    g_free(to);
+    return ok;
+}
+
+/* Datenordner beim Start festlegen; Daten älterer Versionen ziehen mit */
+static void choose_data_dir(void)
+{
+    char *pointer = pointer_path(), *parent = NULL;
+    if (g_file_get_contents(pointer, &parent, NULL, NULL)) g_strstrip(parent);
+    g_free(pointer);
+    if (parent && !*parent) g_clear_pointer(&parent, g_free);
+    char *dir = data_dir_for(parent);
+    if (parent && g_mkdir_with_parents(dir, 0755) != 0) {
+        /* etwa ein Netzlaufwerk, das noch nicht verbunden ist: nichts überschreiben */
+        g_data_problem = g_strdup_printf("Der Datenordner %s ist nicht erreichbar. Bis er wieder "
+                                         "da ist, gilt der Standardordner.", dir);
+        g_free(dir);
+        g_clear_pointer(&parent, g_free);
+        dir = md_default_data_dir();
+    }
+    /* Bis Version 1.2 hieß das Programm ZDF-Downloader */
+    char *legacy = legacy_app_dir(), *oldest = g_build_filename(g_get_home_dir(), OLD_APP_DIR, NULL);
+    if (g_file_test(oldest, G_FILE_TEST_IS_DIR) && !g_file_test(legacy, G_FILE_TEST_EXISTS))
+        g_rename(oldest, legacy);
+    g_free(oldest);
+    /* bis 2.2 lag alles in ~/.mediathek-downloader */
+    if (strcmp(legacy, dir) && has_app_files(legacy) && !has_app_files(dir) &&
+        !g_data_problem) {
+        g_mkdir_with_parents(dir, 0755);
+        move_tree(legacy, dir);
+    }
+    g_free(legacy);
+    g_mkdir_with_parents(dir, 0755);
+    char *old_cache = g_build_filename(dir, OLD_CACHE_DIR_NAME, NULL);
+    char *cache = g_build_filename(dir, CACHE_DIR_NAME, NULL);
+    if (g_file_test(old_cache, G_FILE_TEST_IS_DIR) && !g_file_test(cache, G_FILE_TEST_EXISTS))
+        g_rename(old_cache, cache);
+    g_free(old_cache);
+    g_free(cache);
+    use_data_dir(parent, dir);
+    g_free(parent);
+    g_free(dir);
 }
 
 void md_init(bool persist)
 {
     platform_init();
-    g_app_dir = g_build_filename(g_get_home_dir(), ".mediathek-downloader", NULL);
-    adopt_old_app_dir();
-    g_log_path = g_build_filename(g_app_dir, "protokoll.log", NULL);
-    g_mkdir_with_parents(g_app_dir, 0755);
+    choose_data_dir();
     q.jobs = g_ptr_array_new();
     q.persist = persist;
     q.max_downloads = 2;
@@ -4776,7 +5216,7 @@ char *md_update_download(const MdUpdate *u, char **error)
                           : "Der neuen Version liegt keine Prüfsumme bei.");
         return NULL;
     }
-    char *dir = g_build_filename(g_app_dir, "updates", NULL);
+    char *dir = g_build_filename(md_app_dir(), "updates", NULL);
     g_mkdir_with_parents(dir, 0700);
     char *path = g_build_filename(dir, u->file_name, NULL);
     char *part = g_strconcat(path, ".part", NULL);
@@ -5010,6 +5450,53 @@ guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
     return id;
 }
 
+guint md_queue_convert(const char *path, const MdJobOptions *o)
+{
+    g_mutex_lock(&q.lock);
+    const History *h = g_hash_table_find(q.history, history_has_path, (gpointer)path);
+    char *stem = path_stem(path);
+    bool busy = !h;
+    for (guint i = 0; i < q.jobs->len && !busy; i++) {
+        const Job *other = q.jobs->pdata[i];
+        char *other_stem = path_stem(other->target);
+        busy = other->state != MD_JOB_DONE && other->state != MD_JOB_FAILED &&
+               !strcmp(other_stem, stem);
+        g_free(other_stem);
+    }
+    g_free(stem);
+    if (busy) {
+        g_mutex_unlock(&q.lock);
+        return 0;
+    }
+    Job *j = g_new0(Job, 1);
+    j->id = ++q.next_id;
+    j->title = g_strdup(h->e.title);
+    j->url = g_strdup("");
+    j->target = g_strdup(path);
+    j->key = g_strdup(h->key);
+    j->topic = g_strdup(h->e.topic);
+    j->season = h->e.season;
+    j->episode = h->e.episode;
+    j->main_label = g_strdup("");
+    j->main_lang = g_strdup("");
+    j->extras = g_ptr_array_new_with_free_func(extra_free);
+    j->convert = true;
+    j->keep_original = o->keep_original;
+    j->encoder = o->encoder;
+    j->quality = o->quality;
+    j->gpu_quality = o->gpu_quality;
+    j->cpu_rf = o->cpu_rf;
+    j->total = j->have = MAX(file_size(path), 0);
+    job_set_state(j, MD_JOB_CONVERT_WAITING);
+    j->remaining = -1;
+    g_ptr_array_add(q.jobs, j);
+    guint id = j->id;
+    queue_save();
+    g_cond_signal(&q.wake);
+    g_mutex_unlock(&q.lock);
+    return id;
+}
+
 MdJobView *md_queue_snapshot(int *count)
 {
     g_mutex_lock(&q.lock);
@@ -5086,7 +5573,8 @@ void md_job_retry(guint id)
     g_mutex_lock(&q.lock);
     Job *j = job_by_id(id);
     if (j && j->state == MD_JOB_FAILED) {
-        job_set_state(j, MD_JOB_WAITING);  /* fertige Dateien überspringt der Download von selbst */
+        /* fertige Dateien überspringt der Download von selbst */
+        job_set_state(j, is_reconvert(j) ? MD_JOB_CONVERT_WAITING : MD_JOB_WAITING);
         j->paused = false;
         g_clear_pointer(&j->message, g_free);
         queue_save();
@@ -5119,6 +5607,31 @@ void md_queue_remove_finished(void)
     }
     queue_save();
     g_mutex_unlock(&q.lock);
+}
+
+gint64 md_job_partial_bytes(guint id)
+{
+    g_mutex_lock(&q.lock);
+    Job *j = job_by_id(id);
+    gint64 bytes = j ? partial_bytes(j) : 0;
+    g_mutex_unlock(&q.lock);
+    return bytes;
+}
+
+gint64 md_queue_failed_bytes(int *count)
+{
+    gint64 bytes = 0;
+    int n = 0;
+    g_mutex_lock(&q.lock);
+    for (guint i = 0; i < q.jobs->len; i++) {
+        const Job *j = q.jobs->pdata[i];
+        if (j->state != MD_JOB_FAILED || j->worker) continue;
+        bytes += partial_bytes(j);
+        n++;
+    }
+    g_mutex_unlock(&q.lock);
+    if (count) *count = n;
+    return bytes;
 }
 
 void md_queue_remove_failed(void)
