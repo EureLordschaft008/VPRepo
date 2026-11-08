@@ -31,6 +31,7 @@
 #define PLAYER_TICK_MS 250
 #define REPORT_SECONDS 5        /* so oft den Stand melden */
 #define HIDE_MS 2500            /* Leiste ausblenden nach so langer Ruhe der Maus */
+#define MOTION_MIN_PX 8.0       /* erst so weite Mausbewegung zeigt die Leiste */
 #define SEEK_STEP 10.0
 #define SKIP_TOLERANCE 0.6      /* Sprung zum Schlüsselbild darf so weit (Anteil) danebenliegen */
 #define VOLUME_STEP 0.05
@@ -80,6 +81,8 @@ typedef struct {
     double zoom;                /* sonst: Vergrößerung gegenüber dem eingepassten Bild */
     bool bars_known, bars_found, bars_busy;
     MdCrop bars;                /* Bereich mit Inhalt, wenn Balken fest im Bild sind */
+    bool pointer_known;         /* pointer_x/y: Mausstelle, ab der eine Bewegung zählt */
+    double pointer_x, pointer_y;
     guint tick, hide_timer, osd_timer, inhibit;
     gint64 last_report;
     MdPlayerHooks hooks;
@@ -327,7 +330,9 @@ static void toggle_key_help(Player *p)
  * Zoom
  * ------------------------------------------------------------------------- */
 /* Lage des ganzen Bildes in der Bildfläche width × height: eingepasst, gezoomt oder so groß,
- * dass der Inhalt ohne Balken die Fläche füllt. Was übersteht, wird abgeschnitten. */
+ * dass der Inhalt ohne die schwarzen Balken ganz in die Fläche passt. Vom Inhalt geht dabei
+ * nichts verloren, auch wenn Fläche und Inhalt verschiedene Seitenverhältnisse haben; nur die
+ * Balken stehen über und werden abgeschnitten. */
 static void video_rect(const Player *p, int width, int height, GdkRectangle *r)
 {
     *r = (GdkRectangle){0, 0, width, height};
@@ -343,7 +348,7 @@ static void video_rect(const Player *p, int width, int height, GdkRectangle *r)
         cw = p->bars.width * sx;
         ch = p->bars.height * sy;
     }
-    double scale = p->fill ? MAX(width / cw, height / ch) : fit * p->zoom;
+    double scale = p->fill ? MIN(width / cw, height / ch) : fit * p->zoom;
     scale = CLAMP(scale, fit, fit * ZOOM_MAX);
     double rw = vw * scale, rh = vh * scale;
     double rx = width / 2.0 - (cx + cw / 2) * scale, ry = height / 2.0 - (cy + ch / 2) * scale;
@@ -434,7 +439,7 @@ static gboolean on_bars_done(gpointer data)
         if (p->fill) {
             apply_zoom(p);
             show_osd(p, job->found ? "Schwarze Balken ausgeblendet"
-                                   : "Keine Balken im Bild – Fenster gefüllt");
+                                   : "Keine Balken im Bild – ganzes Bild");
         }
     }
     g_free(job->path);
@@ -450,7 +455,7 @@ static gpointer bars_thread(gpointer data)
     return NULL;
 }
 
-/* Balken im Bild suchen (ffmpeg, einige Sekunden); bis dahin füllt das ganze Bild die Fläche */
+/* Balken im Bild suchen (ffmpeg, einige Sekunden); bis dahin bleibt das ganze Bild eingepasst */
 static void find_bars(Player *p)
 {
     if (p->bars_known || p->bars_busy || !p->path) return;
@@ -469,7 +474,7 @@ static void set_fill(Player *p, bool fill)
     show_osd(p, !fill ? "Ganzes Bild"
                 : p->bars_busy ? "Schwarze Balken werden gesucht …"
                 : p->bars_found ? "Schwarze Balken ausgeblendet"
-                : "Keine Balken im Bild – Fenster gefüllt");
+                : "Keine Balken im Bild – ganzes Bild");
 }
 
 /* Zoom in Schritten, ausgehend von der jetzigen Größe */
@@ -1029,6 +1034,9 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
                                   GDK_KEY_F1};
     bool quiet = false;
     for (size_t i = 0; i < G_N_ELEMENTS(QUIET); i++) quiet |= key == QUIET[i];
+    /* die Hand am Touchpad oder ein vom System gemeldetes Mausereignis während des Tippens soll
+     * die Leiste nicht zeigen: Bewegung zählt erst wieder ab der jetzigen Mausstelle */
+    p->pointer_known = false;
     if (!quiet) show_bar(p);
     switch (key) {
     case GDK_KEY_space: case GDK_KEY_k: toggle_play(p); break;
@@ -1061,11 +1069,23 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     return TRUE;
 }
 
+/* Leiste nur bei echter Bewegung: Wackler um ein paar Pixel und Ereignisse ohne Bewegung, die
+ * Desktop oder Touchpad auch beim Springen per Taste schicken, zeigten sie sonst */
 static gboolean on_motion(GtkWidget *w, GdkEventMotion *e, gpointer data)
 {
     (void)w;
-    (void)e;
-    show_bar(data);
+    Player *p = data;
+    if (!p->pointer_known) {
+        p->pointer_known = true;
+        p->pointer_x = e->x_root;
+        p->pointer_y = e->y_root;
+        return FALSE;
+    }
+    double dx = e->x_root - p->pointer_x, dy = e->y_root - p->pointer_y;
+    if (dx * dx + dy * dy < MOTION_MIN_PX * MOTION_MIN_PX) return FALSE;
+    p->pointer_x = e->x_root;
+    p->pointer_y = e->y_root;
+    show_bar(p);
     return FALSE;
 }
 

@@ -338,35 +338,57 @@ static bool make_video(const char *name, int w, int h, int cw, int ch, int x, in
     char *filter = g_strdup_printf("testsrc2=s=%dx%d:d=70:r=5,pad=%d:%d:%d:%d:black", cw, ch, w, h,
                                    x, y);
     char *argv[] = {"ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", filter, "-c:v",
-                    "libx264", "-preset", "ultrafast", (char *)name, NULL};
+                    "libx264", "-preset", "ultrafast", "-g", "5", (char *)name, NULL};
     bool ok = run_capture(argv, NULL, NULL) == 0;
     g_free(filter);
     return ok;
 }
 
-/* Balken oben/unten und links/rechts werden gefunden, ein volles Bild bleibt ganz */
+/* Testvideo, das 40 s mit Balken oben und unten läuft und danach 30 s das volle Bild zeigt */
+static bool make_changing_video(const char *name)
+{
+    char *argv[] = {"ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=640x268:d=40:r=5,pad=640:360:0:46:black", "-f", "lavfi", "-i",
+                    "testsrc2=s=640x360:d=30:r=5", "-filter_complex",
+                    "[0:v][1:v]concat=n=2:v=1", "-c:v", "libx264", "-preset", "ultrafast", "-g",
+                    "5", (char *)name, NULL};
+    return run_capture(argv, NULL, NULL) == 0;
+}
+
+/* Der gefundene Bereich enthält den Inhalt x, y, w × h ganz, mit höchstens etwas Rand */
+static void assert_contains(const MdCrop *c, int x, int y, int w, int h)
+{
+    g_assert_cmpint(c->x, <=, x);
+    g_assert_cmpint(c->y, <=, y);
+    g_assert_cmpint(c->x + c->width, >=, x + w);
+    g_assert_cmpint(c->y + c->height, >=, y + h);
+    g_assert_cmpint(c->width, <=, w + 2 * CROP_MARGIN + 2);
+    g_assert_cmpint(c->height, <=, h + 2 * CROP_MARGIN + 2);
+}
+
+/* Balken oben/unten und links/rechts werden gefunden, ohne Inhalt abzuschneiden; ein volles
+ * Bild und eines, das später voll wird, bleiben ganz */
 static void test_crop_bars(void)
 {
     char *ffmpeg = g_find_program_in_path("ffmpeg");
     g_free(ffmpeg);
     if (!ffmpeg || !make_video("letterbox.mp4", 640, 360, 640, 268, 0, 46) ||
         !make_video("pillarbox.mp4", 640, 360, 480, 360, 80, 0) ||
-        !make_video("voll.mp4", 640, 360, 640, 360, 0, 0)) {
+        !make_video("voll.mp4", 640, 360, 640, 360, 0, 0) ||
+        !make_changing_video("wechsel.mp4")) {
         g_test_skip("ffmpeg fehlt");
         return;
     }
     MdCrop c;
     g_assert_true(md_detect_bars("letterbox.mp4", &c));
-    g_assert_cmpint(c.width, ==, 640);
-    g_assert_cmpint(c.height, ==, 268);
-    g_assert_cmpint(c.y, ==, 46);
+    assert_contains(&c, 0, 46, 640, 268);
     g_assert_true(md_detect_bars("pillarbox.mp4", &c));
-    g_assert_cmpint(c.width, ==, 480);
-    g_assert_cmpint(c.x, ==, 80);
+    assert_contains(&c, 80, 0, 480, 360);
     g_assert_cmpint(c.frame_width, ==, 640);
     g_assert_false(md_detect_bars("voll.mp4", &c));
+    g_assert_false(md_detect_bars("wechsel.mp4", &c));
     char *filter = crop_filter("pillarbox.mp4", 70);
-    g_assert_cmpstr(filter, ==, "crop=480:360:80:0");
+    g_assert_cmpstr(filter, ==, "crop=488:360:76:0");
     g_free(filter);
 }
 

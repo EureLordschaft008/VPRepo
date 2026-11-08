@@ -105,7 +105,12 @@ das Update unter Linux auch über `sudo apt upgrade`.
   markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm, wandelt nachträglich
   nach AV1 um (eine Datei oder alle Folgen; was schon AV1 ist, bleibt) und verschiebt Filme,
   Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
-  Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet.
+  Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet. An „Weiterschauen“
+  fehlt „Mit anderem Programm öffnen“. Nach der Suche nach neuen Folgen trägt eine Serie
+  „✓ Komplett“, wenn jede Staffel ohne Lücke bis zur letzten angebotenen Folge da ist; komplette
+  Staffeln tragen ein ✓ („Staffel 2 ✓“), die Serienseite nennt „komplett“ oder „2 von 3 Staffeln
+  komplett“. Was keine Mediathek mehr anbietet, kann am Ende einer Staffel fehlen, ohne dass es
+  auffällt.
 - **Ordner prüfen** – gleicht den Speicherort mit dem Verlauf ab: Verschobene Dateien bekommen ihren
   neuen Ort, Dateien, die das Programm noch nicht kennt (etwa aus einer Sicherung), erscheinen in
   „Meine Videos“ und zählen als geladen, sofern ihr Name dem üblichen Schema folgt. Einträge ohne
@@ -119,8 +124,11 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Titelleiste. Er merkt sich, wo eine Datei aufgehört hat, macht dort weiter und startet am Ende die
   nächste Folge. Tonspur und Untertitel lassen sich während der Wiedergabe wechseln bzw. an- und
   ausschalten. Der Zoom blendet schwarze Balken aus: „Schwarze Balken ausblenden“ sucht per ffmpeg
-  nach Balken, die fest im Bild sind, und füllt das Fenster mit dem Inhalt. Tasten: Leertaste
-  Pause, ←/→ 10 Sekunden, ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
+  in jedem Schlüsselbild der ganzen Datei nach Balken, die durchgehend im Bild sind, und vergrößert
+  den Inhalt so weit, wie er ins Fenster passt. Vom Bild wird nichts abgeschnitten, auch wenn Fenster
+  und Bild ein anderes Seitenverhältnis haben oder es sich mitten im Video ändert. Das Ergebnis
+  merkt sich das Programm bis zum Beenden. Tasten: Leertaste
+  Pause, ←/→ 10 Sekunden (ohne Einblendung der Leiste), ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
   0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück, ? oder F1
   blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
@@ -139,7 +147,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Menü erklärt den Ablauf in wenigen Sätzen.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
   dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei.
-- **Pause** – einzeln oder alle. Auch nach dem Beenden oder einem Absturz geht es an derselben
+- **Pause** – einzeln oder alle. Für alle gibt es einen Knopf: Er ist farbig und heißt „Läuft“,
+  solange Aufträge laufen, ein Klick pausiert alle, ein weiterer setzt sie fort. Auch nach dem Beenden oder einem Absturz geht es an derselben
   Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick. Downloads und
   Umwandlung lassen sich außerdem getrennt anhalten (Seite Warteschlange, „Steuerung“): Dann laden etwa
   die Downloads weiter, während die Umwandlung stillsteht.
@@ -154,8 +163,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   dem Download um, mit den Einstellungen des AV1-Converters. Die Bildqualität ist in drei Stufen
   wählbar (Gut, Sehr gut, Beste); „Eigene Werte“ zeigt die Qualitätswerte für Grafikkarte und
   Prozessor. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
-  schneidet es dabei ab; ffmpeg prüft dafür fünf Stellen im Video, und im Zweifel bleibt das Bild
-  ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  schneidet es dabei ab; ffmpeg prüft dafür jedes Schlüsselbild der ganzen Datei, ein schmaler Rand
+  bleibt stehen, und im Zweifel bleibt das Bild ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
   lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).

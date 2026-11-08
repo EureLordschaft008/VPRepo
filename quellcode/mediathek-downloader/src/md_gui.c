@@ -169,6 +169,7 @@ typedef struct {
 typedef struct {
     char **topics;              /* Serien aus dem Verlauf */
     gint64 *finished;           /* je Serie: letzter Download */
+    GHashTable *offers;         /* wie ui.season_offers, für die geprüften Serien */
     int total;
     char *dir;
     int min_minutes;
@@ -335,6 +336,7 @@ typedef struct {
 
     /* Downloads */
     GtkWidget *downloads_page, *hero, *hero_sub, *jobs_list, *jobs_empty, *jobs_more;
+    GtkWidget *run_all;         /* ein Knopf für "Alle pausieren" und "Alle fortsetzen" */
     GtkWidget *clear_failed;
     GtkWidget *hold_downloads, *hold_conversions;   /* Schalter: angehalten */
     int jobs_limit;             /* so viele Zeilen zeigt die Liste */
@@ -358,6 +360,10 @@ typedef struct {
     char *videos_fingerprint;   /* erkennt Änderungen am Verlauf */
     char *open_show;            /* Serie der Serienansicht, NULL = Übersicht */
     int show_season;            /* gewählte Staffel, G_MININT = alle */
+    /* was die Mediatheken von den geladenen Serien anbieten (Suche nach neuen Folgen):
+     * "serie" -> 0 für jede geprüfte Serie, "serie\tstaffel" -> höchste angebotene Folge;
+     * Namen klein; NULL = noch nicht geprüft */
+    GHashTable *season_offers;
     GHashTable *watch;          /* Pfad -> WatchState* */
     GHashTable *frames;         /* Bildschlüssel -> GdkPixbuf* */
     GHashTable *frame_waiting;  /* Bildschlüssel -> GPtrArray der GtkImage, die warten */
@@ -3133,6 +3139,9 @@ static gboolean on_news_done(gpointer data)
     show_news_busy(false);
     rebuild_tree(&ui.news_tree);
     if (ui.cfg.auto_news) queue_news();
+    if (ui.season_offers) g_hash_table_destroy(ui.season_offers);
+    ui.season_offers = job->offers;
+    rebuild_videos(true);           /* Staffeln und Serien als komplett markieren */
     g_ptr_array_free(job->items, TRUE);
     g_strfreev(job->topics);
     g_free(job->finished);
@@ -3180,6 +3189,25 @@ static void show_news_busy(bool busy)
     }
 }
 
+/* Höchste angebotene Folge je Staffel der Serie topic merken (für "komplett") */
+static void record_offers(GHashTable *offers, GPtrArray *titles, const char *topic)
+{
+    char *lower = g_utf8_strdown(topic, -1);
+    g_hash_table_replace(offers, g_strdup(lower), GINT_TO_POINTER(0));
+    for (guint n = 0; n < titles->len; n++) {
+        const MdTitle *t = titles->pdata[n];
+        if (t->is_film || t->season < 0 || t->episode < 1) continue;
+        char *a = g_utf8_strdown(t->topic, -1);
+        if (!strcmp(a, lower)) {
+            char *key = g_strdup_printf("%s\t%d", lower, t->season);
+            int most = GPOINTER_TO_INT(g_hash_table_lookup(offers, key));
+            g_hash_table_replace(offers, key, GINT_TO_POINTER(MAX(most, t->episode)));
+        }
+        g_free(a);
+    }
+    g_free(lower);
+}
+
 static gpointer news_thread(gpointer data)
 {
     NewsJob *job = data;
@@ -3197,6 +3225,7 @@ static gpointer news_thread(gpointer data)
         GPtrArray *titles = md_search(&query, NULL, NULL, &error);
         g_free(error);
         if (!titles) continue;
+        record_offers(job->offers, titles, job->topics[i]);
         GPtrArray *found = g_ptr_array_new();
         for (guint n = titles->len; n-- > 0;)
             if (title_is_news(titles->pdata[n], job->topics[i], job->finished[i], job->dir))
@@ -3223,6 +3252,7 @@ static void start_news_load(void)
                             GSIZE_TO_POINTER(MAX(finished, entries[i].finished)));
     }
     NewsJob *job = g_new0(NewsJob, 1);
+    job->offers = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     guint size = g_hash_table_size(latest), n = 0;
     job->topics = g_new0(char *, size + 1);
     job->finished = g_new0(gint64, size + 1);
@@ -3515,6 +3545,7 @@ static void job_row_update(JobRow *row, const MdJobView *j)
 
 /* Kopfzeile: was läuft gerade? */
 static void on_hold_changed(GObject *w, GParamSpec *spec, gpointer d);
+static void on_run_all_toggled(GtkToggleButton *b, gpointer d);
 
 /* Schalter "Downloads/Umwandlung anhalten" zum Stand bringen ("Alle fortsetzen" hebt beides auf) */
 static void sync_hold_switches(bool downloads, bool conversions)
@@ -3528,6 +3559,24 @@ static void sync_hold_switches(bool downloads, bool conversions)
         gtk_switch_set_active(GTK_SWITCH(switches[i]), states[i]);
         g_signal_handlers_unblock_by_func(switches[i], on_hold_changed, NULL);
     }
+}
+
+/* Knopf zum Stand: gedrückt und farbig, solange etwas läuft oder laufen darf */
+static void update_run_button(int open, int paused, bool held)
+{
+    bool running = open > paused && !held;
+    GtkToggleButton *b = GTK_TOGGLE_BUTTON(ui.run_all);
+    g_signal_handlers_block_by_func(b, on_run_all_toggled, NULL);
+    gtk_toggle_button_set_active(b, running);
+    g_signal_handlers_unblock_by_func(b, on_run_all_toggled, NULL);
+    GtkStyleContext *style = gtk_widget_get_style_context(ui.run_all);
+    if (running) gtk_style_context_add_class(style, "suggested-action");
+    else gtk_style_context_remove_class(style, "suggested-action");
+    gtk_button_set_label(GTK_BUTTON(ui.run_all), running ? "Läuft" : "Alle fortsetzen");
+    gtk_widget_set_tooltip_text(ui.run_all, running ? "Klicken pausiert alle Aufträge"
+                                : open ? "Setzt alle pausierten Aufträge fort"
+                                : "Keine offenen Aufträge");
+    gtk_widget_set_sensitive(ui.run_all, open > 0);
 }
 
 static void update_downloads_hero(const MdJobView *jobs, int count)
@@ -3554,6 +3603,7 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
             remaining = MAX(remaining, j->remaining);
         }
     }
+    update_run_button(open, paused, hold_downloads && hold_conversions);
     char *title;
     if (active)
         title = g_strdup_printf("%d %s aktiv", active, plural(active, "Auftrag", "Aufträge"));
@@ -3731,19 +3781,14 @@ static gboolean on_tick(gpointer d)
     return G_SOURCE_CONTINUE;
 }
 
-static void on_pause_all_clicked(GtkButton *b, gpointer d)
+/* Gedrückt (farbig) = Aufträge laufen; ein Klick pausiert alle bzw. setzt alle fort */
+static void on_run_all_toggled(GtkToggleButton *b, gpointer d)
 {
-    (void)b;
     (void)d;
-    md_queue_set_paused(true);
-}
-
-static void on_resume_all_clicked(GtkButton *b, gpointer d)
-{
-    (void)b;
-    (void)d;
-    md_queue_set_paused(false);
-    show_info_bar(GTK_MESSAGE_INFO, NULL);
+    bool run = gtk_toggle_button_get_active(b);
+    md_queue_set_paused(!run);
+    if (run) show_info_bar(GTK_MESSAGE_INFO, NULL);
+    on_tick(NULL);
 }
 
 static void on_hold_changed(GObject *w, GParamSpec *spec, gpointer d)
@@ -3816,18 +3861,15 @@ static GtkWidget *build_downloads_page(void)
 
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_margin_top(buttons, 10);
-    GtkWidget *pause = gtk_button_new_with_label("Alle pausieren");
-    GtkWidget *resume = gtk_button_new_with_label("Alle fortsetzen");
+    ui.run_all = gtk_toggle_button_new_with_label("Alle fortsetzen");
     GtkWidget *clear = gtk_button_new_with_label("Fertige entfernen");
     ui.clear_failed = gtk_button_new_with_label("Fehlgeschlagene entfernen");
     gtk_widget_set_tooltip_text(ui.clear_failed,
                                 "Löscht nach Rückfrage auch die halbfertigen Dateien");
-    g_signal_connect(pause, "clicked", G_CALLBACK(on_pause_all_clicked), NULL);
-    g_signal_connect(resume, "clicked", G_CALLBACK(on_resume_all_clicked), NULL);
+    g_signal_connect(ui.run_all, "toggled", G_CALLBACK(on_run_all_toggled), NULL);
     g_signal_connect(clear, "clicked", G_CALLBACK(on_clear_done_clicked), NULL);
     g_signal_connect(ui.clear_failed, "clicked", G_CALLBACK(on_clear_failed_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(buttons), pause, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(buttons), resume, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(buttons), ui.run_all, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(buttons), clear, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(buttons), ui.clear_failed, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), buttons, FALSE, FALSE, 0);
@@ -4408,7 +4450,8 @@ static void on_menu_deactivate(GtkMenuShell *menu, gpointer d)
     g_idle_add(destroy_widget, menu);
 }
 
-/* Menü der rechten Maustaste: gesehen/ungesehen, Ordner, anderes Programm */
+/* Menü der rechten Maustaste: gesehen/ungesehen, Ordner, anderes Programm (nicht in
+ * "Weiterschauen") */
 static gboolean on_tile_press(GtkWidget *w, GdkEventButton *e, gpointer d)
 {
     (void)d;
@@ -4433,8 +4476,9 @@ static gboolean on_tile_press(GtkWidget *w, GdkEventButton *e, gpointer d)
     g_object_set_data_full(G_OBJECT(mark), "paths", paths, (GDestroyNotify)g_strfreev);
     if (!all_done) g_object_set_data(G_OBJECT(mark), "watched", GINT_TO_POINTER(1));
     if (single) {
-        add_menu_item(menu, "Mit anderem Programm öffnen", G_CALLBACK(on_menu_open_external),
-                      paths[0]);
+        if (!g_object_get_data(G_OBJECT(w), "resume"))
+            add_menu_item(menu, "Mit anderem Programm öffnen",
+                          G_CALLBACK(on_menu_open_external), paths[0]);
         add_menu_item(menu, "Ordner öffnen", G_CALLBACK(on_menu_open_folder), paths[0]);
     }
     GtkWidget *convert = add_menu_item(menu, single ? "Nach AV1 umwandeln"
@@ -4559,11 +4603,70 @@ static void add_entry_tile(GtkWidget *box, const MdHistoryEntry *e, bool with_sh
     GtkWidget *events = add_video_tile(box, title, subtitle, &image, NULL, watch_fraction(w));
     g_object_set_data(G_OBJECT(events), "entry", (gpointer)e);
     g_object_set_data(G_OBJECT(gtk_widget_get_parent(events)), "entry", (gpointer)e);
+    /* Kachel in "Weiterschauen": dort geht es ums Weiterschauen im Player */
+    if (with_show) g_object_set_data(G_OBJECT(events), "resume", GINT_TO_POINTER(1));
     request_frame(image, e->path, e->path, NULL);
     g_free(label);
     g_free(title);
     g_free(state);
     g_free(subtitle);
+}
+
+/* Ist eine Staffel komplett? Ja, wenn die Folgen von 1 bis zur höchsten geladenen oder
+ * angebotenen ohne Lücke geladen sind. Was keine Mediathek mehr anbietet, kann am Ende einer
+ * Staffel fehlen, ohne dass es auffällt. */
+typedef enum { SEASON_UNKNOWN, SEASON_INCOMPLETE, SEASON_COMPLETE } SeasonState;
+
+static SeasonState season_state(const Show *show, int season)
+{
+    if (show->is_film || season < 0 || !ui.season_offers) return SEASON_UNKNOWN;
+    char *lower = g_utf8_strdown(show->name, -1);
+    bool checked = g_hash_table_contains(ui.season_offers, lower);
+    char *key = g_strdup_printf("%s\t%d", lower, season);
+    int most = GPOINTER_TO_INT(g_hash_table_lookup(ui.season_offers, key));
+    g_free(key);
+    g_free(lower);
+    if (!checked) return SEASON_UNKNOWN;
+    for (guint i = 0; i < show->entries->len; i++) {
+        const MdHistoryEntry *e = show->entries->pdata[i];
+        if (e->season == season) most = MAX(most, e->episode);
+    }
+    if (most < 1) return SEASON_UNKNOWN;
+    bool *have = g_new0(bool, most + 1);
+    for (guint i = 0; i < show->entries->len; i++) {
+        const MdHistoryEntry *e = show->entries->pdata[i];
+        if (e->season == season && e->episode >= 1) have[e->episode] = true;
+    }
+    int missing = 0;
+    for (int n = 1; n <= most; n++) missing += !have[n];
+    g_free(have);
+    return missing ? SEASON_INCOMPLETE : SEASON_COMPLETE;
+}
+
+/* Ist die Serie komplett: jede geladene und jede angebotene Staffel? */
+static bool show_complete(const Show *show)
+{
+    if (show->is_film || !ui.season_offers) return false;
+    bool any = false;
+    for (guint i = 0; i < show->entries->len; i++) {
+        const MdHistoryEntry *e = show->entries->pdata[i];
+        if (e->season < 0) continue;
+        if (season_state(show, e->season) != SEASON_COMPLETE) return false;
+        any = true;
+    }
+    if (!any) return false;
+    /* angebotene Staffeln, von denen nichts geladen ist */
+    char *lower = g_utf8_strdown(show->name, -1), *prefix = g_strconcat(lower, "\t", NULL);
+    bool complete = true;
+    GHashTableIter iter;
+    gpointer key;
+    g_hash_table_iter_init(&iter, ui.season_offers);
+    while (complete && g_hash_table_iter_next(&iter, &key, NULL))
+        if (g_str_has_prefix(key, prefix))
+            complete = season_state(show, atoi((char *)key + strlen(prefix))) == SEASON_COMPLETE;
+    g_free(prefix);
+    g_free(lower);
+    return complete;
 }
 
 /* Kachel einer Serie oder eines Films */
@@ -4609,6 +4712,12 @@ static void add_show_tile(GtkWidget *box, const Show *show)
     const Group *group = preview_group(show);
     if (group && group->has_news) gtk_box_pack_start(GTK_BOX(badges), new_news_badge(), FALSE,
                                                      FALSE, 0);
+    if (show_complete(show)) {
+        GtkWidget *badge = new_badge("✓ Komplett", "ok");
+        gtk_widget_set_tooltip_text(badge, "Alle Folgen geladen, die die Mediatheken anbieten, "
+                                           "ohne Lücke in der Nummerierung");
+        gtk_box_pack_start(GTK_BOX(badges), badge, FALSE, FALSE, 0);
+    }
     const MdHistoryEntry *first = show->entries->pdata[0];
     char *key = g_strdup_printf("show:%s|%d", show->name, group && group->website);
     request_frame(image, key, first->path, group ? group->website : NULL);
@@ -4666,7 +4775,7 @@ static void on_show_play_clicked(GtkButton *b, gpointer d)
 /* Serienansicht füllen; Staffel bleibt, wenn es sie noch gibt */
 static void fill_show_page(const Show *show)
 {
-    int seasons = 0, last = G_MININT, unseen = 0;
+    int seasons = 0, last = G_MININT, unseen = 0, complete_seasons = 0, numbered_seasons = 0;
     bool season_known = false;
     gint64 bytes = 0;
     clear_container(ui.show_seasons);
@@ -4679,9 +4788,14 @@ static void fill_show_page(const Show *show)
         last = e->season;
         seasons++;
         season_known |= e->season == ui.show_season;
-        char *text = e->season >= 0 ? g_strdup_printf("Staffel %d", e->season)
+        bool done = season_state(show, e->season) == SEASON_COMPLETE;
+        complete_seasons += done;
+        numbered_seasons += e->season >= 0;
+        char *text = e->season >= 0 ? g_strdup_printf(done ? "Staffel %d ✓" : "Staffel %d",
+                                                      e->season)
                                     : g_strdup("Ohne Staffel");
         GtkWidget *chip = gtk_radio_button_new_with_label(group, text);
+        if (done) gtk_widget_set_tooltip_text(chip, "Staffel komplett");
         group = gtk_radio_button_get_group(GTK_RADIO_BUTTON(chip));
         gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(chip), FALSE);
         add_css_class(chip, "zd-chip");
@@ -4704,8 +4818,16 @@ static void fill_show_page(const Show *show)
 
     int count = (int)show->entries->len;
     char *size = md_format_size((double)bytes);
-    char *sub = g_strdup_printf("%d %s · %d von %d gesehen · %s", count,
-                                plural(count, "Folge", "Folgen"), count - unseen, count, size);
+    char *complete = show_complete(show) ? g_strdup(" · komplett")
+                     : complete_seasons ? g_strdup_printf(" · %d von %d %s komplett",
+                                                          complete_seasons, numbered_seasons,
+                                                          plural(numbered_seasons, "Staffel",
+                                                                 "Staffeln"))
+                     : g_strdup("");
+    char *sub = g_strdup_printf("%d %s · %d von %d gesehen · %s%s", count,
+                                plural(count, "Folge", "Folgen"), count - unseen, count, size,
+                                complete);
+    g_free(complete);
     set_label_text(ui.show_title, show->name);
     set_label_text(ui.show_sub, sub);
     bool resume = false;

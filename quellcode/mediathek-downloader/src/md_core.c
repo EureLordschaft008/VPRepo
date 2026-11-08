@@ -125,9 +125,10 @@ static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define ENCODER_NICE 5
 #define SVT_PRESET "6"
 #define GOP_FRAMES "500"            /* Keyframe alle 10 s bei 50 Bildern/s */
-#define CROP_SAMPLES 5              /* Stellen im Video für die Suche nach Balken */
-#define CROP_FRAMES "25"            /* Bilder je Stelle */
 #define CROP_MIN_PIXELS 8           /* schmalere Ränder bleiben */
+#define CROP_MARGIN 4               /* so viel Rand bleibt um den erkannten Inhalt stehen */
+#define CROP_MIN_FRAMES 10          /* weniger geprüfte Bilder: lieber nichts abschneiden */
+#define CROP_PARTS 4                /* so viele Abschnitte prüfen Balken gleichzeitig */
 #define QUEUE_HEADER "#mediathek-downloader-warteschlange 1"
 #define QUEUE_HEADER_OLD "#zdf-downloader-warteschlange 1"
 #define OLD_APP_DIR ".zdf-downloader"
@@ -4330,47 +4331,113 @@ static bool video_size(const char *path, int *width, int *height)
     return ok;
 }
 
-/* Fest ins Bild kodierte schwarze Balken finden: cropdetect an CROP_SAMPLES Stellen, der
- * Bereich mit Inhalt ist die Vereinigung aller Stellen. Eine dunkle Szene lässt sich so nicht
- * für einen Balken halten. -> false, wenn es nichts abzuschneiden gibt. */
+/* Ein Abschnitt der Datei für detect_bars */
+typedef struct {
+    const char *path;
+    double from, length;
+    int x1, x2, y1, y2, frames;
+    bool ok;
+} CropPart;
+
+static gpointer crop_part_thread(gpointer data)
+{
+    CropPart *part = data;
+    char from[32], length[32];
+    g_ascii_formatd(from, sizeof from, "%.3f", part->from);
+    g_ascii_formatd(length, sizeof length, "%.3f", part->length);
+    char *argv[] = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info", "-skip_frame",
+                    "nokey", "-ss", from, "-t", length, "-i", (char *)part->path, "-map", "0:v:0",
+                    "-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-sn", "-f", "null", "-",
+                    NULL};
+    char *err = NULL;
+    part->ok = run_capture(argv, NULL, &err) == 0 && err;
+    /* mit reset=0 steht der Bereich aller bisherigen Bilder in jeder Zeile, der aller Bilder
+     * also in der letzten */
+    for (const char *at = err; part->ok && (at = strstr(at, "x1:")); at += 3) part->frames++;
+    const char *last = part->ok ? g_strrstr(err, "x1:") : NULL;
+    part->ok = last && sscanf(last, "x1:%d x2:%d y1:%d y2:%d", &part->x1, &part->x2, &part->y1,
+                              &part->y2) == 4 && part->x2 > part->x1 && part->y2 > part->y1;
+    g_free(err);
+    return NULL;
+}
+
+/* letzte Ergebnisse von detect_bars je Datei (Pfad, Größe und Änderungszeit) */
+static GHashTable *crop_cache;
+static GMutex crop_lock;
+
+static char *crop_cache_key(const char *path)
+{
+    GStatBuf st;
+    if (g_stat(path, &st) != 0) return NULL;
+    return g_strdup_printf("%s|%lld|%lld", path, (long long)st.st_size, (long long)st.st_mtime);
+}
+
+/* Fest ins Bild kodierte schwarze Balken finden: cropdetect über jedes Schlüsselbild der ganzen
+ * Datei, in CROP_PARTS Abschnitten gleichzeitig; das Ergebnis bleibt je Datei gespeichert. Der
+ * Bereich mit Inhalt ist die Vereinigung aller Bilder. So bleibt auch eine Szene ganz, in der
+ * sich das Seitenverhältnis ändert (etwa ein Abschnitt im Vollbild), und eine dunkle Szene gilt
+ * nicht als Balken. Um den Inhalt bleibt ein Rand von CROP_MARGIN Pixeln; im Zweifel bleibt
+ * das Bild ganz. -> false, wenn es nichts abzuschneiden gibt. */
 static bool detect_bars(const char *path, double duration, MdCrop *crop)
 {
-    int width = 0, height = 0;
-    if (duration < 60 || !video_size(path, &width, &height)) return false;
-    int x1 = width, x2 = -1, y1 = height, y2 = -1, valid = 0;
-    for (int i = 0; i < CROP_SAMPLES; i++) {
-        char at[32];
-        g_ascii_formatd(at, sizeof at, "%.1f", duration * (i + 1) / (CROP_SAMPLES + 1));
-        char *argv[] = {"ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info", "-ss", at,
-                        "-i", (char *)path, "-map", "0:v:0", "-vf",
-                        "cropdetect=limit=24:round=2:reset=0", "-frames:v", CROP_FRAMES, "-an",
-                        "-sn", "-f", "null", "-", NULL};
-        char *err = NULL;
-        if (run_capture(argv, NULL, &err) == 0 && err) {
-            /* mit reset=0 steht der Bereich aller Bilder in der letzten Zeile */
-            const char *last = g_strrstr(err, "x1:");
-            int a1, a2, b1, b2;
-            if (last && sscanf(last, "x1:%d x2:%d y1:%d y2:%d", &a1, &a2, &b1, &b2) == 4 &&
-                a2 > a1 && b2 > b1) {
-                x1 = MIN(x1, a1);
-                x2 = MAX(x2, a2);
-                y1 = MIN(y1, b1);
-                y2 = MAX(y2, b2);
-                valid++;
-            }
-        }
-        g_free(err);
+    char *key = crop_cache_key(path);
+    g_mutex_lock(&crop_lock);
+    MdCrop *known = key && crop_cache ? g_hash_table_lookup(crop_cache, key) : NULL;
+    bool found = known && known->width > 0;
+    if (found) *crop = *known;
+    g_mutex_unlock(&crop_lock);
+    if (known) {
+        g_free(key);
+        return found;
     }
-    if (valid < CROP_SAMPLES / 2 + 1) return false;
-    /* gerade Werte, im Zweifel etwas mehr Bild */
-    x1 = MAX(x1, 0) & ~1;
-    y1 = MAX(y1, 0) & ~1;
-    int w = MIN((x2 - x1 + 2) & ~1, width - x1), h = MIN((y2 - y1 + 2) & ~1, height - y1);
-    bool worth = width - w >= CROP_MIN_PIXELS || height - h >= CROP_MIN_PIXELS;
-    if (!worth || w < width / 2 || h < height / 2) return false;
-    *crop = (MdCrop){.x = x1, .y = y1, .width = w, .height = h, .frame_width = width,
-                     .frame_height = height};
-    return true;
+    MdCrop result = {0};
+    int width = 0, height = 0;
+    if (duration >= 60 && video_size(path, &width, &height)) {
+        /* Abschnitte gleichzeitig; sie überlappen etwas, damit kein Schlüsselbild fehlt */
+        CropPart parts[CROP_PARTS];
+        GThread *threads[CROP_PARTS];
+        double length = duration / CROP_PARTS;
+        for (int i = 0; i < CROP_PARTS; i++) {
+            parts[i] = (CropPart){.path = path, .from = i * length,
+                                  .length = i + 1 < CROP_PARTS ? length + 15 : length + 60};
+            threads[i] = g_thread_new("balken", crop_part_thread, &parts[i]);
+        }
+        int x1 = width, x2 = -1, y1 = height, y2 = -1, frames = 0;
+        bool ok = true;
+        for (int i = 0; i < CROP_PARTS; i++) {
+            g_thread_join(threads[i]);
+            /* ein Abschnitt ohne Ergebnis könnte gerade den Teil mit vollem Bild enthalten */
+            ok &= parts[i].ok;
+            x1 = MIN(x1, parts[i].x1);
+            x2 = MAX(x2, parts[i].x2);
+            y1 = MIN(y1, parts[i].y1);
+            y2 = MAX(y2, parts[i].y2);
+            frames += parts[i].frames;
+        }
+        if (ok && frames >= CROP_MIN_FRAMES) {
+            /* Rand dazu, auf gerade Werte nach außen gerundet */
+            x1 = MAX(x1 - CROP_MARGIN, 0) & ~1;
+            y1 = MAX(y1 - CROP_MARGIN, 0) & ~1;
+            x2 = MIN((x2 + CROP_MARGIN + 2) & ~1, width);
+            y2 = MIN((y2 + CROP_MARGIN + 2) & ~1, height);
+            int w = (x2 - x1) & ~1, h = (y2 - y1) & ~1;
+            if (x1 + w < x2 && x1 + w + 2 <= width) w += 2;
+            if (y1 + h < y2 && y1 + h + 2 <= height) h += 2;
+            bool worth = width - w >= CROP_MIN_PIXELS || height - h >= CROP_MIN_PIXELS;
+            if (worth && w >= width / 2 && h >= height / 2)
+                result = (MdCrop){.x = x1, .y = y1, .width = w, .height = h,
+                                  .frame_width = width, .frame_height = height};
+        }
+    }
+    if (key) {
+        g_mutex_lock(&crop_lock);
+        if (!crop_cache)
+            crop_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        g_hash_table_replace(crop_cache, key, g_memdup2(&result, sizeof result));
+        g_mutex_unlock(&crop_lock);
+    }
+    if (result.width > 0) *crop = result;
+    return result.width > 0;
 }
 
 bool md_detect_bars(const char *path, MdCrop *crop)
