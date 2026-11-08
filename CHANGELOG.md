@@ -64,6 +64,14 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.4.0 (08.11.2026)
+- Meine Videos zeigt, welche Serien („✓ Komplett“) und Staffeln („Staffel 2 ✓“) komplett sind.
+- Ein gemeinsamer Knopf zum Pausieren und Fortsetzen aller Aufträge; farbig, solange sie laufen.
+- Schwarze Balken: Das Bild wird nur noch eingepasst, nie beschnitten; ffmpeg prüft dafür die
+  ganze Datei, auch wenn sich das Seitenverhältnis mittendrin ändert.
+- Weiterschauen ohne „Mit anderem Programm öffnen“.
+- 10-Sekunden-Sprünge per Pfeiltaste blenden die Leiste nicht mehr ein.
+
 ### 2.3.1 (07.11.2026)
 - Freie Suche in der Oberfläche: Enter im Suchfeld der Vorschau sucht in allen Mediatheken.
 - Tastenkürzel: Strg+1–6 wählen die Reiter, Strg+F sucht, F5 lädt neu, F1 zeigt alle Kürzel.
