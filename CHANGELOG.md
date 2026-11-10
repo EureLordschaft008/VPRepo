@@ -64,6 +64,9 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.6.1 (10.11.2026)
+- Intros werden jetzt auch unter Windows erkannt; bisher fehlte dort der Knopf „Intro überspringen“.
+
 ### 2.6.0 (10.11.2026)
 - Der Player rechnet das Bild unter Linux in der Grafikkarte um (abschaltbar unter Einstellungen →
   Player) und ruckelt auch bei 1080p mit 50 Bildern je Sekunde nicht mehr.
