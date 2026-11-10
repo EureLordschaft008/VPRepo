@@ -64,6 +64,17 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.6.0 (10.11.2026)
+- Der Player rechnet das Bild unter Linux in der Grafikkarte um (abschaltbar unter Einstellungen →
+  Player) und ruckelt auch bei 1080p mit 50 Bildern je Sekunde nicht mehr.
+- Die AV1-Umwandlung dekodiert mit der Grafikkarte auch das Ausgangsvideo, etwa dreimal so schnell.
+- Weniger Last im Leerlauf; „Meine Videos“ prüft im Hintergrund, ob die Dateien noch da sind.
+- Warteschlange: Serien mit mindestens drei offenen Aufträgen bekommen eine Gruppenzeile zum
+  Pausieren, Fortsetzen und Entfernen; ist alles erledigt, meldet das System „Warteschlange fertig“.
+- Hörfassungen gelten als Tonspur mit Audiodeskription derselben Folge, nicht als eigene Folge.
+- Intros werden gleich nach dem Download gesucht; die Taste I überspringt das Intro.
+- Protokoll und Zwischenspeicher wachsen nicht mehr unbegrenzt.
+
 ### 2.5.1 (10.11.2026)
 - Intros überspringen: Während des Vorspanns erscheint der Knopf „Intro überspringen“; mit
   „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player von selbst weiter.
