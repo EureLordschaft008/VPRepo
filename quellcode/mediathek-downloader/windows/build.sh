@@ -22,13 +22,13 @@ windres -I "$WORK" "$WORK/app.rc" -O coff -o "$WORK/app.res.o"
 # --- Programme -----------------------------------------------------------------------------
 FLAGS="-O2 -Wall -Wextra -pthread"
 # shellcheck disable=SC2046
-gcc $FLAGS $(pkg-config --cflags gtk+-3.0 gstreamer-1.0) -mwindows \
+gcc $FLAGS $(pkg-config --cflags gtk+-3.0 gstreamer-1.0 libchromaprint) -mwindows \
     -o "$APP/bin/mediathek-downloader.exe" \
     src/md_gui.c src/md_player.c src/md_stats.c src/md_core.c "$WORK/app.res.o" \
-    $(pkg-config --libs gtk+-3.0 gstreamer-1.0)
+    $(pkg-config --libs gtk+-3.0 gstreamer-1.0 libchromaprint)
 # shellcheck disable=SC2046
-gcc $FLAGS $(pkg-config --cflags glib-2.0) -o "$APP/bin/mediathek-downloader-cli.exe" \
-    src/md_cli.c src/md_core.c "$WORK/app.res.o" $(pkg-config --libs glib-2.0)
+gcc $FLAGS $(pkg-config --cflags glib-2.0 libchromaprint) -o "$APP/bin/mediathek-downloader-cli.exe" \
+    src/md_cli.c src/md_core.c "$WORK/app.res.o" $(pkg-config --libs glib-2.0 libchromaprint)
 strip "$APP/bin/"*.exe
 
 # --- Werkzeuge -----------------------------------------------------------------------------
@@ -93,11 +93,6 @@ cp LICENSE "$APP/LICENSE.txt"
 "$APP/bin/mediathek-downloader-cli.exe" --help > /dev/null
 "$APP/bin/curl.exe" --version > /dev/null
 "$APP/bin/ffmpeg.exe" -hide_banner -version > /dev/null
-# Intro-Erkennung braucht Chromaprint in ffmpeg; fehlt es, gibt es keinen Knopf (Warnung im Log)
-# (erst ganz lesen: grep -q bricht die Pipe sonst ab, und pipefail meldet das als Fehler)
-muxers=$("$APP/bin/ffmpeg.exe" -hide_banner -muxers 2> /dev/null)
-grep -q chromaprint <<< "$muxers" ||
-    echo "::warning::ffmpeg ohne Chromaprint – Intros werden unter Windows nicht erkannt"
 makensis -V2 -DVERSION="$VERSION" -DSRC="$(cygpath -aw "$APP")" \
     -DICON="$(cygpath -aw "$WORK/mediathek-downloader.ico")" \
     -DLICENSE="$(cygpath -aw LICENSE)" \

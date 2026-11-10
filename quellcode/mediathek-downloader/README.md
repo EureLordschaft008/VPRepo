@@ -158,14 +158,14 @@ das Update unter Linux auch über `sudo apt upgrade`.
   **Intros:** Läuft der Vorspann einer Serienfolge, erscheint unten rechts der Knopf „Intro
   überspringen“. Mit „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player
   von selbst ans Ende und zeigt kurz „Intro übersprungen“; wer danach zurück ins Intro spult, sieht
-  es. Erkannt wird das Intro wie bei Jellyfin am Ton: ffmpeg berechnet für die ersten zehn Minuten
-  der Folge und zweier Nachbarfolgen derselben Serie einen Audio-Fingerabdruck (Chromaprint), und
+  es. Erkannt wird das Intro wie bei Jellyfin am Ton: Für die ersten zehn Minuten der Folge und
+  zweier Nachbarfolgen derselben Serie entsteht ein Audio-Fingerabdruck (Chromaprint), und
   ein Abschnitt von 15 Sekunden bis drei Minuten, der in beiden Nachbarn gleich klingt, gilt als
   Intro – auch nach einer Szene vor dem Vorspann. Anfang und Ende rücken auf den nächsten Schnitt
   im Bild. Das läuft gleich nach dem Download im Hintergrund, sonst beim ersten Abspielen, und dauert
   etwa 10 bis 20 Sekunden mit niedriger Priorität; das Ergebnis steht danach in `intros.tsv` im Datenordner. Voraussetzungen: Die Folge
-  hat eine Staffel- und Folgennummer, von der Serie ist mindestens eine weitere Folge geladen, und
-  ffmpeg kann Chromaprint (sonst erscheint kein Knopf). Ganz kurze Titelkarten (unter 15 Sekunden)
+  hat eine Staffel- und Folgennummer, und von der Serie ist mindestens eine weitere Folge geladen
+  (sonst erscheint kein Knopf). Ganz kurze Titelkarten (unter 15 Sekunden)
   gelten nicht als Intro.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so

@@ -40,6 +40,7 @@
  * Zustand der Warteschlange (geschützt durch q.lock), GROSSBUCHSTABEN = Konstanten.
  */
 #define _GNU_SOURCE
+#include <chromaprint.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <glib.h>
@@ -4742,8 +4743,9 @@ bool md_detect_bars(const char *path, MdCrop *crop)
  * Intros erkennen
  *
  * Wie bei Jellyfin: Von den ersten INTRO_SCAN Sekunden einer Folge und zweier Nachbarfolgen
- * derselben Serie berechnet ffmpeg einen Audio-Fingerabdruck (Chromaprint, ein 32-Bit-Wert
- * je INTRO_STEP Sekunden). Ein Abschnitt, der in beiden Folgen gleich klingt (je Wert
+ * derselben Serie berechnet libchromaprint aus dem Ton, den ffmpeg dekodiert, einen
+ * Audio-Fingerabdruck (ein 32-Bit-Wert je INTRO_STEP Sekunden). Die Bibliothek statt des
+ * chromaprint-Muxers von ffmpeg, weil das ffmpeg unter Windows (MSYS2) ohne ihn gebaut ist. Ein Abschnitt, der in beiden Folgen gleich klingt (je Wert
  * höchstens INTRO_MAX_BITS abweichende Bits, Lücken bis INTRO_GAP), mindestens INTRO_MIN
  * und höchstens INTRO_MAX lang, ist das Intro – auch wenn vorher schon eine Szene läuft.
  * Beide Nachbarn müssen ihn bestätigen: So gilt ein Rückblick auf die Vorwoche, den nur die
@@ -4817,8 +4819,33 @@ static void intro_cache_store(const char *key, double start, double end)
     g_mutex_unlock(&intro_lock);
 }
 
-/* Audio-Fingerabdruck der ersten INTRO_SCAN Sekunden; NULL = keiner (kein Ton, kein
- * Chromaprint in ffmpeg) */
+#define INTRO_RATE 11025                    /* Abtastrate, mit der Chromaprint rechnet */
+
+/* Fingerabdruck aus Ton (16 Bit, mono, INTRO_RATE); NULL = zu kurz */
+static GArray *intro_fingerprint_pcm(const gint16 *samples, gsize count)
+{
+    ChromaprintContext *ctx = chromaprint_new(CHROMAPRINT_ALGORITHM_DEFAULT);
+    if (!ctx) return NULL;
+    GArray *print = NULL;
+    uint32_t *raw = NULL;
+    int size = 0;
+    bool ok = chromaprint_start(ctx, INTRO_RATE, 1);
+    /* in Stücken, weil feed eine int-Länge nimmt */
+    for (gsize done = 0; ok && done < count; done += 1 << 20) {
+        gsize n = MIN(count - done, (gsize)1 << 20);
+        ok = chromaprint_feed(ctx, samples + done, (int)n);
+    }
+    if (ok && chromaprint_finish(ctx) && chromaprint_get_raw_fingerprint(ctx, &raw, &size) &&
+        size >= 100) {
+        print = g_array_sized_new(FALSE, FALSE, sizeof(guint32), (guint)size);
+        g_array_append_vals(print, raw, (guint)size);
+    }
+    if (raw) chromaprint_dealloc(raw);
+    chromaprint_free(ctx);
+    return print;
+}
+
+/* Audio-Fingerabdruck der ersten INTRO_SCAN Sekunden; NULL = keiner (kein Ton) */
 static GArray *intro_fingerprint(const char *path)
 {
     char *key = crop_cache_key(path);
@@ -4835,29 +4862,25 @@ static GArray *intro_fingerprint(const char *path)
         return print;
     }
     char *tmp = NULL;
-    int fd = g_file_open_tmp("mediathek-intro-XXXXXX.raw", &tmp, NULL);
+    int fd = g_file_open_tmp("mediathek-intro-XXXXXX.pcm", &tmp, NULL);
     if (fd < 0) {
         g_free(key);
         return NULL;
     }
     close(fd);
-    char scan[16];
+    char scan[16], rate[16];
     g_snprintf(scan, sizeof scan, "%d", INTRO_SCAN);
+    g_snprintf(rate, sizeof rate, "%d", INTRO_RATE);
+    /* Ton als 16-Bit-PCM (Little Endian wie alle Zielsysteme), mono, INTRO_RATE */
     char *argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-t", scan,
                     "-i", (char *)path, "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1",
-                    "-f", "chromaprint", "-fp_format", "raw", "-y", tmp, NULL};
+                    "-ar", rate, "-c:a", "pcm_s16le", "-f", "s16le", "-y", tmp, NULL};
     char *data = NULL;
     gsize length = 0;
     /* läuft neben der Wiedergabe: niedrige Priorität */
     if (run_capture_with(argv, NULL, NULL, true) == 0 &&
-        g_file_get_contents(tmp, &data, &length, NULL) && length >= 4 * 100) {
-        print = g_array_sized_new(FALSE, FALSE, sizeof(guint32), (guint)(length / 4));
-        for (gsize i = 0; i + 4 <= length; i += 4) {
-            const guchar *b = (const guchar *)data + i;
-            guint32 v = b[0] | (guint32)b[1] << 8 | (guint32)b[2] << 16 | (guint32)b[3] << 24;
-            g_array_append_val(print, v);
-        }
-    }
+        g_file_get_contents(tmp, &data, &length, NULL))
+        print = intro_fingerprint_pcm((const gint16 *)data, length / 2);
     g_free(data);
     g_unlink(tmp);
     g_free(tmp);
