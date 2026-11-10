@@ -39,6 +39,10 @@ bool md_player_play(GtkStack *stack, const char *path, const char *title, double
 bool md_player_pip(void);
 /* Player schließen und die Seite entfernen; ruft vorher hooks.closed */
 void md_player_close(void);
+/* Farbumrechnung fürs Bild in der Grafikkarte (VA-API) statt im Prozessor; gilt ab dem nächsten
+ * Öffnen des Players. possible: gibt es das hier überhaupt? */
+void md_player_set_gpu_convert(bool on);
+bool md_player_gpu_convert_possible(void);
 /* Erkannte Intros von selbst überspringen statt nur den Knopf zu zeigen */
 void md_player_set_auto_skip_intro(bool on);
 /* Tasten des Players, je Zeile "Taste\tWirkung" */

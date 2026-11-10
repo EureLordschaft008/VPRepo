@@ -134,6 +134,9 @@ static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define OLD_APP_DIR ".zdf-downloader"
 #define LEGACY_APP_DIR ".mediathek-downloader"  /* bis 2.2: immer im Benutzerordner */
 #define DATA_DIR_NAME "Mediathek Downloader"    /* Unterordner im gewählten Ordner */
+#define LOG_MAX_BYTES (2 * 1024 * 1024)
+#define CACHE_SEARCH_KEEP_SECONDS (2 * 24 * 3600)
+#define HISTORY_CHECK_SECONDS 10    /* so alt darf das Wissen über vorhandene Dateien sein */
 #define CACHE_DIR_NAME "Zwischenspeicher"
 #define OLD_CACHE_DIR_NAME "bilder"             /* bis 2.2 */
 #define POINTER_DIR "mediathek-downloader"      /* in ~/.config bzw. %LOCALAPPDATA% */
@@ -145,6 +148,7 @@ static const double QUALITY_KBIT_PER_SECOND[] = {6660, 3360, 808};
 #define FFMPEG_MISSING_TEXT "Das Programm ist unvollständig installiert (ffmpeg fehlt). Bitte " \
                             "neu installieren."
 #define AUDIO_BYTES_PER_SECOND 16000    /* Zusatzspur: AAC 128 kbit/s */
+#define HEAR_PREFIX "Hörfassung:"
 #define VARIANT_MAX_DIFFERENCE 30       /* Sekunden: so nah muss die Länge der Fassungen sein */
 
 /* Sprachfassungen, die das ZDF am Titelende in Klammern nennt */
@@ -927,6 +931,12 @@ static void title_analyse(MdTitle *t)
         t->track_label = VARIANTS[i].label;
         t->track_lang = VARIANTS[i].lang;
         break;
+    }
+    /* ZDF: "Hörfassung: Herzschmerz" ist die Folge "Herzschmerz" als reine Tonfassung */
+    if (!t->track_label && g_str_has_prefix(t->name, HEAR_PREFIX)) {
+        memmove(t->name, t->name + strlen(HEAR_PREFIX), strlen(t->name + strlen(HEAR_PREFIX)) + 1);
+        t->track_label = "Audiodeskription";
+        t->track_lang = "deu";
     }
     g_strstrip(t->name);
     if ((t->source & ARD_STYLE)) {                   /* "… · Praxis mit Meerblick" */
@@ -2275,8 +2285,12 @@ static void history_append_line(GString *out, const History *h)
 }
 
 /* Verlauf laden; spätere Zeilen ersetzen frühere mit demselben Schlüssel */
+static gint64 history_checked;      /* monotone Zeit der letzten Dateiprüfung, 0 = nie */
+static void intro_queue(const char *path);
+
 static void history_load(void)
 {
+    history_checked = 0;
     g_clear_pointer(&q.history_names, g_hash_table_destroy);
     q.history = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, history_free);
     char *path = history_path(), *text = NULL;
@@ -2316,6 +2330,8 @@ static void history_add(const Job *j)
     h->e.season = j->season;
     h->e.episode = j->episode;
     h->e.size = MAX(file_size(h->e.path), 0);
+    h->e.exists = true;
+    if (q.persist && h->e.season >= 0) intro_queue(h->e.path);
     /* nachträglich umgewandelt: geladen wurde die Datei schon früher */
     const History *before = *j->url ? NULL : g_hash_table_lookup(q.history, j->key);
     h->e.finished = before ? before->e.finished : g_get_real_time() / G_USEC_PER_SEC;
@@ -2356,13 +2372,66 @@ static int history_compare(gconstpointer a, gconstpointer b)
 {
     const MdHistoryEntry *x = a, *y = b;
     int order = g_utf8_collate(x->topic, y->topic);
+    /* ohne Staffel ans Ende: Sonderfassungen sollen nicht vor Staffel 1 stehen */
+    if (!order) order = (x->season < 0) - (y->season < 0);
     if (!order) order = x->season - y->season;
     if (!order) order = x->episode - y->episode;
     return order ? order : g_utf8_collate(x->title, y->title);
 }
 
-MdHistoryEntry *md_history_snapshot(int *count)
+/* Liegen die Dateien noch dort? Das Ergebnis je Eintrag merkt sich der Verlauf (e.exists),
+ * damit die Oberfläche nicht bei jedem Auffrischen auf die Platte wartet: Die kann schlafen. */
+static int history_checking;        /* Prüfung im Hintergrund läuft */
+static int history_changed;         /* die Prüfung hat etwas anderes ergeben als gemerkt */
+
+/* Dateien prüfen und das Ergebnis im Verlauf merken -> hat sich etwas geändert? */
+static bool history_check_files(void)
 {
+    g_mutex_lock(&q.lock);
+    GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
+    GHashTableIter iter;
+    gpointer value;
+    g_hash_table_iter_init(&iter, q.history);
+    while (g_hash_table_iter_next(&iter, NULL, &value))
+        g_ptr_array_add(paths, g_strdup(((History *)value)->e.path));
+    g_mutex_unlock(&q.lock);
+    /* außerhalb der Sperre: die Platte kann schlafen */
+    GHashTable *found = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; i < paths->len; i++)
+        if (file_size(paths->pdata[i]) >= 0) g_hash_table_add(found, paths->pdata[i]);
+    bool changed = false;
+    g_mutex_lock(&q.lock);
+    g_hash_table_iter_init(&iter, q.history);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        History *h = value;
+        bool exists = g_hash_table_contains(found, h->e.path);
+        changed |= exists != h->e.exists;
+        h->e.exists = exists;
+    }
+    history_checked = g_get_monotonic_time();
+    g_mutex_unlock(&q.lock);
+    g_hash_table_destroy(found);
+    g_ptr_array_free(paths, TRUE);
+    return changed;
+}
+
+static gpointer history_check_thread(gpointer data)
+{
+    (void)data;
+    if (history_check_files()) g_atomic_int_set(&history_changed, 1);
+    g_atomic_int_set(&history_checking, 0);
+    return NULL;
+}
+
+static MdHistoryEntry *history_snapshot(int *count, bool check)
+{
+    g_mutex_lock(&q.lock);
+    bool known = history_checked != 0;
+    bool stale = g_get_monotonic_time() - history_checked > HISTORY_CHECK_SECONDS * G_USEC_PER_SEC;
+    g_mutex_unlock(&q.lock);
+    if (check || !known) history_check_files();
+    else if (stale && g_atomic_int_compare_and_exchange(&history_checking, 0, 1))
+        g_thread_unref(g_thread_new("dateien", history_check_thread, NULL));
     g_mutex_lock(&q.lock);
     *count = (int)g_hash_table_size(q.history);
     MdHistoryEntry *entries = g_new0(MdHistoryEntry, MAX(*count, 1));
@@ -2380,10 +2449,23 @@ MdHistoryEntry *md_history_snapshot(int *count)
         n++;
     }
     g_mutex_unlock(&q.lock);
-    /* außerhalb der Sperre: die Platte kann schlafen */
-    for (int i = 0; i < n; i++) entries[i].exists = file_size(entries[i].path) >= 0;
     qsort(entries, (size_t)n, sizeof *entries, (int (*)(const void *, const void *))history_compare);
     return entries;
+}
+
+MdHistoryEntry *md_history_snapshot(int *count)
+{
+    return history_snapshot(count, true);
+}
+
+MdHistoryEntry *md_history_snapshot_cached(int *count)
+{
+    return history_snapshot(count, false);
+}
+
+bool md_history_take_changed(void)
+{
+    return g_atomic_int_compare_and_exchange(&history_changed, 1, 0);
 }
 
 void md_history_snapshot_free(MdHistoryEntry *entries, int count)
@@ -3545,8 +3627,11 @@ static void queue_write(GString *text)
 
 /* Warteschlange sichern lassen (q.lock gehalten). Der Verteiler schreibt sie, so blockiert
  * weder die Oberfläche noch ein Worker, und viele Änderungen hintereinander ergeben eine Datei. */
+static int queue_serial;            /* zählt jede Änderung an der Warteschlange */
+
 static void queue_save(void)
 {
+    g_atomic_int_inc(&queue_serial);
     if (!q.persist) return;
     q.save_due = true;
     g_cond_signal(&q.wake);
@@ -4485,7 +4570,16 @@ static void add_gpu_encoder(GPtrArray *a, const char *device, const char *qualit
                             const char *crop)
 {
     (void)device;
-    char *filter = g_strdup_printf("%s%sformat=p010,hwupload", crop ? crop : "", crop ? "," : "");
+    /* Die Bilder kommen aus der Grafikkarte (dann reicht hwupload sie durch) oder, wenn sie das
+     * Format nicht dekodiert, aus dem Prozessor. crop setzt bei Bildern in der Grafikkarte nur
+     * den Ausschnitt; erst scale_vaapi mit fester Größe schneidet ihn aus. */
+    int width = 0, height = 0;
+    char *size = crop && sscanf(crop, "crop=%d:%d:", &width, &height) == 2
+                     ? g_strdup_printf("w=%d:h=%d:", width, height)
+                     : g_strdup("");
+    char *filter = g_strdup_printf("%s%sformat=nv12|p010|vaapi,hwupload,scale_vaapi=%sformat=p010",
+                                   crop ? crop : "", crop ? "," : "", size);
+    g_free(size);
     args_add(a, (const char *const[]){"-vf", filter, "-c:v", "av1_vaapi",
                                       "-rc_mode", "CQP", "-global_quality:v", quality,
                                       "-g:v", GOP_FRAMES, NULL});
@@ -4971,6 +5065,27 @@ static bool intro_against(GArray *self, GArray *other, double *start, double *en
                        (int)other->len, start, end);
 }
 
+static void intro_pool_run(gpointer data, gpointer user)
+{
+    (void)user;
+    double start, end;
+    md_find_intro(data, &start, &end);
+    g_free(data);
+}
+
+/* Intro einer frisch geladenen Folge gleich suchen (eine nach der anderen, niedrige Priorität):
+ * Dann ist der Knopf beim ersten Abspielen sofort da */
+static void intro_queue(const char *path)
+{
+    static GThreadPool *pool;
+    static gsize once;
+    if (g_once_init_enter(&once)) {
+        pool = g_thread_pool_new(intro_pool_run, NULL, 1, FALSE, NULL);
+        g_once_init_leave(&once, 1);
+    }
+    if (pool) g_thread_pool_push(pool, g_strdup(path), NULL);
+}
+
 bool md_find_intro(const char *path, double *start, double *end)
 {
     char *key = crop_cache_key(path);
@@ -5070,8 +5185,16 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
     args_add(a, (const char *const[]){"ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel",
                                       "error", "-progress", "pipe:1", "-nostats", NULL});
 #ifndef G_OS_WIN32
-    if (!copy && encoder == MD_ENCODER_GPU)
-        args_add(a, (const char *const[]){"-vaapi_device", device, NULL});
+    if (!copy && encoder == MD_ENCODER_GPU) {
+        /* auch dekodieren und nach 10 Bit umrechnen soll die Grafikkarte: Im Prozessor kostete
+         * das bei 1080p50 das Dreifache an Zeit und fast die ganze Rechenlast. Kann sie das
+         * Format nicht dekodieren, dekodiert ffmpeg von selbst im Prozessor. */
+        char *init = g_strdup_printf("vaapi=va:%s", device);
+        args_add(a, (const char *const[]){"-init_hw_device", init, "-filter_hw_device", "va",
+                                          "-hwaccel", "vaapi", "-hwaccel_device", "va",
+                                          "-hwaccel_output_format", "vaapi", NULL});
+        g_free(init);
+    }
 #endif
     args_add(a, (const char *const[]){"-i", j->target, NULL});
 
@@ -5685,10 +5808,52 @@ static void choose_data_dir(void)
     g_free(dir);
 }
 
+/* Protokoll begrenzen: über LOG_MAX_BYTES bleibt die neuere Hälfte */
+static void log_trim(void)
+{
+    char *text = NULL;
+    gsize length = 0;
+    if (file_size(md_log_path()) <= LOG_MAX_BYTES ||
+        !g_file_get_contents(md_log_path(), &text, &length, NULL))
+        return;
+    const char *keep = text + length - LOG_MAX_BYTES / 2;
+    const char *line = strchr(keep, '\n');
+    if (line) g_file_set_contents(md_log_path(), line + 1, -1, NULL);
+    g_free(text);
+}
+
+/* Alte Trefferlisten der Suche löschen: Sie gelten nur SEARCH_CACHE_SECONDS, bleiben aber
+ * liegen und sind bald der größte Teil des Zwischenspeichers. Bilder und Seitenangaben bleiben,
+ * die gibt es bei abgelaufenen Sendungen nicht noch einmal. */
+static gpointer cache_clean_thread(gpointer data)
+{
+    (void)data;
+    char *dir = cache_dir();
+    GDir *d = g_dir_open(dir, 0, NULL);
+    const char *name;
+    int removed = 0;
+    time_t now = time(NULL);
+    while (d && (name = g_dir_read_name(d))) {
+        if (!g_str_has_suffix(name, ".suche")) continue;
+        char *path = g_build_filename(dir, name, NULL);
+        GStatBuf st;
+        if (g_stat(path, &st) == 0 && now - st.st_mtime > CACHE_SEARCH_KEEP_SECONDS &&
+            g_unlink(path) == 0)
+            removed++;
+        g_free(path);
+    }
+    if (d) g_dir_close(d);
+    if (removed) md_log("Zwischenspeicher: %d alte Trefferlisten gelöscht", removed);
+    g_free(dir);
+    return NULL;
+}
+
 void md_init(bool persist)
 {
     platform_init();
     choose_data_dir();
+    log_trim();
+    if (persist) g_thread_unref(g_thread_new("aufräumen", cache_clean_thread, NULL));
     q.jobs = g_ptr_array_new();
     q.persist = persist;
     q.max_downloads = 2;
@@ -6160,6 +6325,19 @@ guint md_queue_convert(const char *path, const MdJobOptions *o)
     return id;
 }
 
+int md_queue_serial(void)
+{
+    return g_atomic_int_get(&queue_serial);
+}
+
+bool md_queue_busy(void)
+{
+    g_mutex_lock(&q.lock);
+    bool busy = q.workers > 0;
+    g_mutex_unlock(&q.lock);
+    return busy;
+}
+
 MdJobView *md_queue_snapshot(int *count)
 {
     g_mutex_lock(&q.lock);
@@ -6168,7 +6346,8 @@ MdJobView *md_queue_snapshot(int *count)
         Job *j = q.jobs->pdata[i];
         views[i] = (MdJobView){j->id, j->state, j->paused, j->merging, g_strdup(j->title),
                                g_strdup(j->target), g_strdup(j->message), g_strdup(j->key),
-                               j->have, j->total, j->speed, j->progress, j->remaining};
+                               j->have, j->total, j->speed, j->progress, j->remaining,
+                               g_strdup(j->topic)};
     }
     *count = (int)q.jobs->len;
     g_mutex_unlock(&q.lock);
@@ -6182,6 +6361,7 @@ void md_queue_snapshot_free(MdJobView *views, int count)
         g_free(views[i].target);
         g_free(views[i].message);
         g_free(views[i].key);
+        g_free(views[i].topic);
     }
     g_free(views);
 }
@@ -6293,6 +6473,16 @@ void md_queue_remove_topic(const char *topic)
             job_discard(j);
         }
     }
+    queue_save();
+    g_cond_broadcast(&q.wake);
+    g_mutex_unlock(&q.lock);
+}
+
+void md_queue_pause_topic(const char *topic, bool paused)
+{
+    g_mutex_lock(&q.lock);
+    for (guint i = 0; i < q.jobs->len; i++)
+        if (job_of_topic(q.jobs->pdata[i], topic)) job_set_paused(q.jobs->pdata[i], paused);
     queue_save();
     g_cond_broadcast(&q.wake);
     g_mutex_unlock(&q.lock);

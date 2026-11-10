@@ -45,6 +45,8 @@
 #define SETTINGS_FILE "einstellungen.ini"
 #define RESULT_ROWS_BATCH 200   /* Zeilen der Trefferliste auf einmal (weitere per Knopf) */
 #define TICK_MS 500
+#define TICK_IDLE 10            /* ohne Arbeit: nur jeder so vielte Takt sieht nach */
+#define TICK_HIDDEN 4            /* Fenster verborgen, Aufträge laufen */
 #define INFO_LINES_MAX 3        /* so viele Meldungen zeigt die Leiste übereinander */
 #define JOB_ROWS_BATCH 100      /* Zeilen der Downloadliste auf einmal (weitere per Knopf) */
 #define PREVIEW_TILES_BATCH 30  /* Kacheln je Abschnitt auf einmal (weitere per Knopf) */
@@ -256,7 +258,7 @@ typedef struct {
 typedef struct {
     guint id;
     GtkWidget *row, *title, *subtitle, *bar, *pause, *retry, *remove, *open;
-    char *target;
+    char *target, *topic;
     bool seen;
     int order;                  /* Platz in der Liste */
     bool shown, paused;         /* shown: Stand unten gilt */
@@ -277,11 +279,13 @@ typedef struct {
     char *update_skip;          /* diese Version nicht mehr anbieten */
     bool auto_news;             /* neue Folgen geladener Serien von selbst laden */
     bool skip_intro;            /* erkannte Intros im Player von selbst überspringen */
+    bool gpu_convert;           /* Player: Farbumrechnung in der Grafikkarte */
     bool hold_downloads, hold_conversions;  /* alle Downloads bzw. Umwandlungen angehalten */
 } Config;
 
 typedef struct {
     GtkApplication *app;
+    GHashTable *job_groups;     /* Sendungen mit eigener Gruppenzeile in der Warteschlange */
     GtkWidget *win, *header, *stack, *infobar, *info_label;
     Config cfg;
     int layout_width;
@@ -390,6 +394,7 @@ static void show_news_busy(bool busy);
 static void update_tiles(void);
 static void update_genres(void);
 static void rebuild_videos(bool force);
+static gboolean on_tick(gpointer d);
 static void play_path(const char *path);
 static void on_video_tile_activated(GtkFlowBox *box, GtkFlowBoxChild *child, gpointer d);
 static void update_selection(void);
@@ -875,6 +880,8 @@ static void settings_load(void)
     c->auto_news = settings_bool(file, "NeueFolgenLaden", false);
     c->skip_intro = settings_bool(file, "IntroUeberspringen", false);
     md_player_set_auto_skip_intro(c->skip_intro);
+    c->gpu_convert = settings_bool(file, "PlayerGrafikkarte", true);
+    md_player_set_gpu_convert(c->gpu_convert);
     c->hold_downloads = settings_bool(file, "DownloadsAngehalten", false);
     c->hold_conversions = settings_bool(file, "UmwandlungAngehalten", false);
     c->update_skip = g_key_file_get_string(file, SETTINGS_GROUP, "UpdateUebersprungen", NULL);
@@ -906,6 +913,7 @@ static void settings_save(void)
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UpdateSuchen", c->update_check);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "NeueFolgenLaden", c->auto_news);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "IntroUeberspringen", c->skip_intro);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "PlayerGrafikkarte", c->gpu_convert);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "DownloadsAngehalten", c->hold_downloads);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UmwandlungAngehalten", c->hold_conversions);
     if (c->update_skip)
@@ -3375,6 +3383,7 @@ static void job_row_free(gpointer data)
 {
     JobRow *row = data;
     g_free(row->target);
+    g_free(row->topic);
     g_free(row->status);
     g_free(row);
 }
@@ -3422,11 +3431,131 @@ static void on_job_open_clicked(GtkButton *b, gpointer d)
 }
 
 /* Zeile der Warteschlange an Platz order anlegen */
+/* --- Aufträge einer Serie als Gruppe ----------------------------------------------------
+ * Hat eine Sendung mindestens JOB_GROUP_MIN offene Aufträge, steht über ihrem ersten eine Zeile
+ * mit dem Namen und Knöpfen für alle zusammen. Die Reihenfolge bleibt die der Abarbeitung. */
+#define JOB_GROUP_MIN 3
+
+static void on_group_pause(GtkButton *b, gpointer d)
+{
+    md_queue_pause_topic(g_object_get_data(G_OBJECT(b), "topic"), GPOINTER_TO_INT(d));
+    on_tick(NULL);
+}
+
+static void on_group_remove(GtkButton *b, gpointer d)
+{
+    (void)d;
+    const char *topic = g_object_get_data(G_OBJECT(b), "topic");
+    int jobs = md_queue_topic_jobs(topic);
+    if (!jobs) return;
+    char *title = g_strdup_printf("Alle %d offenen Aufträge von „%s“ entfernen?", jobs, topic);
+    bool yes = ask_confirmation(title, "Laufende Downloads und Umwandlungen werden abgebrochen, "
+                                       "schon geladene Teile gelöscht. Fertige Videos bleiben.",
+                                "Behalten", "Entfernen", true);
+    g_free(title);
+    if (!yes) return;
+    md_queue_remove_topic(topic);
+    on_tick(NULL);
+}
+
+static GtkWidget *new_group_header(const char *topic)
+{
+    GtkWidget *h = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    add_css_class(h, "zd-job-group");
+    gtk_widget_set_margin_top(h, 8);
+    gtk_widget_set_margin_bottom(h, 2);
+    gtk_widget_set_margin_start(h, 14);
+    gtk_widget_set_margin_end(h, 12);
+    GtkWidget *label = new_label(topic, "zd-heading");
+    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_box_pack_start(GTK_BOX(h), label, TRUE, TRUE, 0);
+    const struct {
+        const char *icon, *tip;
+        GCallback callback;
+        int arg;
+    } buttons[] = {
+        {"media-playback-pause-symbolic", "Alle Aufträge dieser Serie pausieren",
+         G_CALLBACK(on_group_pause), 1},
+        {"media-playback-start-symbolic", "Alle Aufträge dieser Serie fortsetzen",
+         G_CALLBACK(on_group_pause), 0},
+        {"window-close-symbolic", "Alle offenen Aufträge dieser Serie entfernen",
+         G_CALLBACK(on_group_remove), 0},
+    };
+    for (size_t i = 0; i < G_N_ELEMENTS(buttons); i++) {
+        GtkWidget *b = new_icon_button(buttons[i].icon, buttons[i].tip);
+        g_object_set_data_full(G_OBJECT(b), "topic", g_strdup(topic), g_free);
+        g_signal_connect(b, "clicked", buttons[i].callback, GINT_TO_POINTER(buttons[i].arg));
+        gtk_box_pack_start(GTK_BOX(h), b, FALSE, FALSE, 0);
+    }
+    g_object_set_data_full(G_OBJECT(h), "topic", g_strdup(topic), g_free);
+    gtk_widget_show_all(h);
+    return h;
+}
+
+static void job_row_header(GtkListBoxRow *this_row, GtkListBoxRow *before, gpointer data)
+{
+    (void)data;
+    const JobRow *row = g_object_get_data(G_OBJECT(this_row), "job");
+    const JobRow *prev = before ? g_object_get_data(G_OBJECT(before), "job") : NULL;
+    GtkWidget *header = gtk_list_box_row_get_header(this_row);
+    bool group = row && row->topic && ui.job_groups &&
+                 g_hash_table_contains(ui.job_groups, row->topic) &&
+                 (!prev || g_strcmp0(prev->topic, row->topic));
+    if (group) {
+        const char *shown = header ? g_object_get_data(G_OBJECT(header), "topic") : NULL;
+        if (g_strcmp0(shown, row->topic))
+            gtk_list_box_row_set_header(this_row, new_group_header(row->topic));
+    } else if (!before) {
+        gtk_list_box_row_set_header(this_row, NULL);
+    } else if (!header || !GTK_IS_SEPARATOR(header)) {
+        gtk_list_box_row_set_header(this_row, gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+    }
+}
+
+/* Welche Sendungen bilden eine Gruppe? -> hat sich das geändert? */
+static bool update_job_groups(const MdJobView *jobs, int count)
+{
+    GHashTable *counts = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (int i = 0; i < count; i++) {
+        if (jobs[i].state == MD_JOB_DONE || !jobs[i].topic || !*jobs[i].topic) continue;
+        int n = GPOINTER_TO_INT(g_hash_table_lookup(counts, jobs[i].topic));
+        g_hash_table_replace(counts, g_strdup(jobs[i].topic), GINT_TO_POINTER(n + 1));
+    }
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, counts);
+    while (g_hash_table_iter_next(&iter, &key, &value))
+        if (GPOINTER_TO_INT(value) < JOB_GROUP_MIN) g_hash_table_iter_remove(&iter);
+    bool changed = !ui.job_groups || g_hash_table_size(counts) != g_hash_table_size(ui.job_groups);
+    g_hash_table_iter_init(&iter, counts);
+    while (!changed && g_hash_table_iter_next(&iter, &key, NULL))
+        changed = !g_hash_table_contains(ui.job_groups, key);
+    if (ui.job_groups) g_hash_table_destroy(ui.job_groups);
+    ui.job_groups = counts;
+    return changed;
+}
+
+/* Meldung des Systems, wenn die Warteschlange leer gelaufen ist und das Fenster nicht vorn ist */
+static void notify_queue_done(const MdJobView *jobs, int count)
+{
+    static int before = -1;
+    int open = 0;
+    for (int i = 0; i < count; i++) open += jobs[i].state != MD_JOB_DONE && jobs[i].state != MD_JOB_FAILED;
+    if (before > 0 && open == 0 && !gtk_window_is_active(GTK_WINDOW(ui.win))) {
+        GNotification *note = g_notification_new("Warteschlange fertig");
+        g_notification_set_body(note, "Alle Downloads und Umwandlungen sind abgeschlossen.");
+        g_application_send_notification(G_APPLICATION(ui.app), "warteschlange-fertig", note);
+        g_object_unref(note);
+    }
+    before = open;
+}
+
 static JobRow *new_job_row(const MdJobView *j, int order)
 {
     JobRow *row = g_new0(JobRow, 1);
     row->id = j->id;
     row->target = g_strdup(j->target);
+    row->topic = g_strdup(j->topic);
     row->order = order;
     row->row = gtk_list_box_row_new();
     g_object_set_data(G_OBJECT(row->row), "job", row);
@@ -3738,9 +3867,27 @@ static GHashTable *changed_job_keys(const MdJobView *jobs, int count)
  * Die Liste zeigt nur die ersten jobs_limit Aufträge: Tausende Zeilen machen GTK zäh. */
 static gboolean on_tick(gpointer d)
 {
-    (void)d;
+    /* Der Takt (d gesetzt) kopiert sonst zweimal je Sekunde die ganze Warteschlange, auch wenn
+     * nichts läuft. Ohne Änderung und ohne arbeitenden Auftrag reicht alle TICK_IDLE Takte ein
+     * Blick, bei verborgenem Fenster auch mit Arbeit nur jeder TICK_HIDDEN-te. */
+    static int last_serial = -1, skipped;
+    int serial = md_queue_serial();
+    if (d && serial == last_serial) {
+        bool busy = md_queue_busy();
+        bool shown = gtk_widget_get_mapped(ui.win) &&
+                     !(gdk_window_get_state(gtk_widget_get_window(ui.win)) &
+                       GDK_WINDOW_STATE_ICONIFIED);
+        if (++skipped < (busy ? (shown ? 1 : TICK_HIDDEN) : TICK_IDLE)) {
+            update_genres();
+            return G_SOURCE_CONTINUE;
+        }
+    }
+    last_serial = serial;
+    skipped = 0;
     int count = 0;
     MdJobView *jobs = md_queue_snapshot(&count);
+    bool groups_changed = update_job_groups(jobs, count);
+    notify_queue_done(jobs, count);
     JobSlot *slots = g_new(JobSlot, MAX(count, 1));
     for (int i = 0; i < count; i++) slots[i] = (JobSlot){job_rank(&jobs[i]), i};
     qsort(slots, count, sizeof *slots, job_slot_compare);
@@ -3761,6 +3908,7 @@ static gboolean on_tick(gpointer d)
     g_free(slots);
     g_hash_table_foreach_remove(ui.job_rows, job_row_stale, NULL);
     if (moved) gtk_list_box_invalidate_sort(GTK_LIST_BOX(ui.jobs_list));
+    else if (groups_changed) gtk_list_box_invalidate_headers(GTK_LIST_BOX(ui.jobs_list));
     gtk_widget_set_visible(ui.jobs_empty, count == 0);
     gtk_widget_set_visible(ui.jobs_more, count > shown);
     if (count > shown) {
@@ -3776,7 +3924,7 @@ static gboolean on_tick(gpointer d)
         ui.job_marks = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, job_mark_free);
     GHashTable *keys = changed_job_keys(jobs, count);
     md_queue_snapshot_free(jobs, count);
-    if (first || g_hash_table_size(keys)) {
+    if (first || g_hash_table_size(keys) || md_history_take_changed()) {
         refresh_statuses(first ? NULL : keys);
         rebuild_videos(false);
     }
@@ -3907,6 +4055,7 @@ static GtkWidget *build_downloads_page(void)
 
     ui.jobs_list = add_group(page, "Aufträge");
     gtk_list_box_set_sort_func(GTK_LIST_BOX(ui.jobs_list), job_row_compare, NULL, NULL);
+    gtk_list_box_set_header_func(GTK_LIST_BOX(ui.jobs_list), job_row_header, NULL, NULL);
     ui.jobs_limit = JOB_ROWS_BATCH;
     ui.jobs_more = gtk_button_new_with_label("Weitere anzeigen");
     gtk_widget_set_halign(ui.jobs_more, GTK_ALIGN_CENTER);
@@ -5166,7 +5315,9 @@ static void on_videos_filter_changed(GtkComboBox *combo, gpointer d)
 static void rebuild_videos(bool force)
 {
     int count = 0;
-    MdHistoryEntry *entries = md_history_snapshot(&count);
+    /* von selbst (Takt): nicht auf die Platte warten; nach einer Aktion des Nutzers genau */
+    MdHistoryEntry *entries = force ? md_history_snapshot(&count)
+                                    : md_history_snapshot_cached(&count);
     GString *mark = g_string_new(NULL);
     for (int i = 0; i < count; i++)
         g_string_append_printf(mark, "%s|%d|%" G_GINT64_FORMAT "\n", entries[i].path,
@@ -6132,7 +6283,7 @@ static void on_data_reset_clicked(GtkButton *b, gpointer d)
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
 static GtkWidget *quality_combo, *encoder_combo, *gpu_spin, *cpu_spin, *parallel_spin;
 static GtkWidget *convert_spin, *av1_switch, *keep_switch, *signed_switch, *min_spin;
-static GtkWidget *update_switch, *news_switch, *intro_switch;
+static GtkWidget *update_switch, *news_switch, *intro_switch, *gpu_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
@@ -6162,6 +6313,10 @@ static void on_setting_changed(GtkWidget *w, gpointer d)
     c->update_check = gtk_switch_get_active(GTK_SWITCH(update_switch));
     c->skip_intro = gtk_switch_get_active(GTK_SWITCH(intro_switch));
     md_player_set_auto_skip_intro(c->skip_intro);
+    if (gpu_switch) {
+        c->gpu_convert = gtk_switch_get_active(GTK_SWITCH(gpu_switch));
+        md_player_set_gpu_convert(c->gpu_convert);
+    }
     bool auto_news = c->auto_news;
     c->auto_news = gtk_switch_get_active(GTK_SWITCH(news_switch));
     if (c->auto_news && !auto_news) start_news_load();      /* gleich nachsehen */
@@ -6290,6 +6445,12 @@ static GtkWidget *build_settings_page(void)
             "Der Vorspann einer Serie wird am Ton erkannt, den mehrere Folgen gemeinsam haben. "
             "Ausgeschaltet erscheint während des Intros der Knopf „Intro überspringen“.", NULL,
             intro_switch, NULL);
+    if (md_player_gpu_convert_possible()) {
+        gpu_switch = new_setting_switch(c->gpu_convert);
+        add_row(player_group, "Bild in der Grafikkarte umrechnen",
+                "Entlastet den Prozessor und verhindert Ruckeln bei hoher Auflösung. Bei Bildfehlern "
+                "ausschalten; gilt ab dem nächsten Öffnen des Players.", NULL, gpu_switch, NULL);
+    }
 
     GtkWidget *start = add_group(page, "Automatisch");
     GtkWidget *autostart = gtk_switch_new();
@@ -7063,7 +7224,7 @@ static void on_activate(GtkApplication *app, gpointer d)
     rebuild_videos(true);
     if (!md_stats_load()) stats_import();   /* erst jetzt kennen die Dateien ihre Serie */
     show_start_notes();
-    g_timeout_add(TICK_MS, on_tick, NULL);
+    g_timeout_add(TICK_MS, on_tick, GINT_TO_POINTER(1));   /* 1 = Takt, darf auslassen */
     ui.film_limit = ui.series_limit = PREVIEW_TILES_BATCH;
     rebuild_preview();
     sync_genre_chips();

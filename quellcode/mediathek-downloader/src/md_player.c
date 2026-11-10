@@ -77,7 +77,8 @@ typedef struct {
     GtkWidget *error_box, *error_label, *osd, *subtitle, *intro_button;
     GtkWidget *pip_window, *pip_revealer, *pip_play;  /* pip_window: NULL = im Hauptfenster */
     GtkStack *stack;
-    GstElement *playbin, *sink;
+    GstElement *playbin, *sink;         /* sink: gtksink oder der Kasten mit vapostproc davor */
+    GstElement *vpp, *vpp_filter, *gtk_sink;    /* vpp: NULL = Umrechnung im Prozessor */
     char *path, *title, *next_path, *next_title;
     double start, duration;
     double video_width, video_height;   /* Bildgröße samt Pixelseitenverhältnis, 0 = unbekannt */
@@ -106,11 +107,14 @@ typedef struct {
 static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
 static bool auto_skip_intro;
+static bool gpu_convert = true;     /* Einstellung */
+static bool gpu_convert_failed;     /* hat in diesem Lauf einen Fehler ausgelöst */
 
 static void load_file(Player *p, const char *path, const char *title, double start);
 static void build_track_menu(Player *p, bool text);
 static void hide_subtitle(Player *p);
 static void pip_leave(Player *p);
+static void drop_gpu_convert(Player *p);
 
 /* ---------------------------------------------------------------------------
  * Kleine Helfer
@@ -382,6 +386,7 @@ const char *md_player_keys_text(void)
            "0\tGanzes Bild\n"
            "F, F11 oder Doppelklick\tVollbild\n"
            "N\tNächste Folge\n"
+           "I\tIntro überspringen\n"
            "Esc\tZurück\n"
            "? oder F1\tDiese Übersicht";
 }
@@ -1059,6 +1064,20 @@ static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
     case GST_MESSAGE_ERROR: {
         GError *err = NULL;
         gst_message_parse_error(message, &err, NULL);
+        if (p->vpp && p->path) {
+            /* vielleicht liegt es an der Umrechnung in der Grafikkarte: einmal ohne versuchen */
+            md_log("Player: Fehler mit Umrechnung in der Grafikkarte (%s), weiter ohne",
+                   err ? err->message : "?");
+            g_clear_error(&err);
+            double at = p->prerolled ? current_position(p) : p->start;
+            char *path = g_strdup(p->path), *title = g_strdup(p->title);
+            gst_element_set_state(p->playbin, GST_STATE_NULL);
+            drop_gpu_convert(p);
+            load_file(p, path, title, at);
+            g_free(path);
+            g_free(title);
+            break;
+        }
         /* erst was zu tun ist, der GStreamer-Text nur als Detail */
         char *text = g_strdup_printf("Die Datei lässt sich hier nicht abspielen. Vielleicht ist "
                                      "sie unvollständig – mit dem Standard-Player versuchen.\n\n"
@@ -1196,6 +1215,9 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     case GDK_KEY_Down: change_volume(p, -VOLUME_STEP); break;
     case GDK_KEY_f: case GDK_KEY_F11: toggle_fullscreen(p); break;
     case GDK_KEY_n: play_next(p); break;
+    case GDK_KEY_i:
+        if (p->intro_was_in) skip_intro(p);
+        break;
     case GDK_KEY_a: next_audio(p); break;
     case GDK_KEY_s: next_text(p); break;
     case GDK_KEY_z: set_fill(p, !p->fill); break;
@@ -1525,6 +1547,55 @@ static void load_css(void)
     g_object_unref(css);
 }
 
+/* gtksink nimmt nur BGRx/BGRA im Hauptspeicher. Die Umrechnung dorthin macht playbin sonst mit
+ * videoconvert auf einem einzigen Prozessorkern: Bei 1080p50 mit 10 Bit schafft der unter Last
+ * keine 30 Bilder je Sekunde, das Bild ruckelt. Mit VA-API rechnet die Grafikkarte um
+ * (vapostproc), gemessen gut dreimal so schnell. Rückgabe: was playbin als Bildausgabe bekommt. */
+static GstElement *wrap_gpu_convert(Player *p, GstElement *sink)
+{
+    p->gtk_sink = sink;
+    if (!gpu_convert || gpu_convert_failed) return sink;
+    GstElement *vpp = gst_element_factory_make("vapostproc", NULL);
+    if (!vpp) return sink;
+    /* lässt sich die Grafikkarte öffnen? */
+    bool usable = gst_element_set_state(vpp, GST_STATE_READY) != GST_STATE_CHANGE_FAILURE;
+    gst_element_set_state(vpp, GST_STATE_NULL);
+    GstElement *filter = usable ? gst_element_factory_make("capsfilter", NULL) : NULL;
+    if (!filter) {
+        gst_object_unref(vpp);
+        return sink;
+    }
+    GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "BGRx", NULL);
+    g_object_set(filter, "caps", caps, NULL);
+    gst_caps_unref(caps);
+    GstElement *bin = gst_bin_new("bild");
+    gst_bin_add_many(GST_BIN(bin), vpp, filter, sink, NULL);
+    gst_element_link_many(vpp, filter, sink, NULL);
+    GstPad *pad = gst_element_get_static_pad(vpp, "sink");
+    gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
+    gst_object_unref(pad);
+    p->vpp = vpp;
+    p->vpp_filter = filter;
+    md_log("Player: Farbumrechnung in der Grafikkarte (VA-API)");
+    return bin;
+}
+
+/* Nach einem Fehler: Umrechnung wieder im Prozessor, wie ohne VA-API. playbin steht auf NULL */
+static void drop_gpu_convert(Player *p)
+{
+    gpu_convert_failed = true;
+    gst_element_set_state(p->sink, GST_STATE_NULL);
+    GstPad *ghost = gst_element_get_static_pad(p->sink, "sink");
+    GstPad *pad = gst_element_get_static_pad(p->gtk_sink, "sink");
+    gst_ghost_pad_set_target(GST_GHOST_PAD(ghost), NULL);
+    gst_element_unlink_many(p->vpp, p->vpp_filter, p->gtk_sink, NULL);
+    gst_bin_remove_many(GST_BIN(p->sink), p->vpp, p->vpp_filter, NULL);
+    gst_ghost_pad_set_target(GST_GHOST_PAD(ghost), pad);
+    gst_object_unref(pad);
+    gst_object_unref(ghost);
+    p->vpp = p->vpp_filter = NULL;
+}
+
 /* Seite samt Pipeline anlegen; NULL = GStreamer fehlt */
 static Player *player_new(GtkStack *stack)
 {
@@ -1538,7 +1609,7 @@ static Player *player_new(GtkStack *stack)
     load_css();
     Player *p = g_new0(Player, 1);
     p->playbin = playbin;
-    p->sink = sink;
+    p->sink = p->gtk_sink = sink;
     p->zoom = 1;
     p->seek_target = -1;
     g_object_get(sink, "widget", &p->video, NULL);
@@ -1548,8 +1619,11 @@ static Player *player_new(GtkStack *stack)
         g_object_set(text_sink, "emit-signals", TRUE, "sync", TRUE, "async", FALSE, NULL);
         g_signal_connect(text_sink, "new-sample", G_CALLBACK(on_text_sample), p);
         g_object_set(playbin, "text-sink", text_sink, NULL);
+        /* nur mit eigenem Untertitel-Ziel: sonst blendet playbin Untertitel selbst ins Bild
+         * ein, und das kann mit Bildern in der Grafikkarte nichts anfangen */
+        p->sink = wrap_gpu_convert(p, sink);
     }
-    g_object_set(playbin, "video-sink", sink, "volume", last_volume, NULL);
+    g_object_set(playbin, "video-sink", p->sink, "volume", last_volume, NULL);
     GstBus *bus = gst_element_get_bus(playbin);
     gst_bus_set_sync_handler(bus, on_bus_sync, NULL, NULL);
     gst_bus_add_watch(bus, on_bus, p);
@@ -1629,6 +1703,19 @@ static Player *player_new(GtkStack *stack)
 void md_player_set_auto_skip_intro(bool on)
 {
     auto_skip_intro = on;
+}
+
+void md_player_set_gpu_convert(bool on)
+{
+    gpu_convert = on;
+}
+
+bool md_player_gpu_convert_possible(void)
+{
+    if (!gst_init_check(NULL, NULL, NULL)) return false;
+    GstElementFactory *factory = gst_element_factory_find("vapostproc");
+    if (factory) gst_object_unref(factory);
+    return factory != NULL;
 }
 
 bool md_player_available(char **why)

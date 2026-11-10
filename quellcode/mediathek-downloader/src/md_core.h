@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.5.1"
+#define MD_VERSION "2.6.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -102,6 +102,7 @@ typedef struct {
     double speed;               /* Download: Bytes/s */
     double progress;            /* 0..1 der aktuellen Phase */
     double remaining;           /* Sekunden der aktuellen Phase, < 0 = unbekannt */
+    char *topic;                /* Sendung */
 } MdJobView;
 
 /* Angaben von der Seite des Titels */
@@ -203,6 +204,10 @@ guint md_queue_add(const MdTitle *title, const MdJobOptions *options);
 /* Schon geladene Datei path (aus dem Verlauf) nachträglich nach AV1 umwandeln; Encoder,
  * Qualität und keep_original aus o. -> Auftragsnummer; 0 = nicht im Verlauf oder schon in Arbeit */
 guint md_queue_convert(const char *path, const MdJobOptions *o);
+/* Für die Oberfläche: Hat sich an der Warteschlange etwas geändert (Zähler), arbeitet gerade
+ * ein Auftrag (dann ändern sich Fortschritt und Tempo laufend)? */
+int md_queue_serial(void);
+bool md_queue_busy(void);
 MdJobView *md_queue_snapshot(int *count);
 void md_queue_snapshot_free(MdJobView *views, int count);
 void md_job_set_paused(guint id, bool paused);
@@ -217,6 +222,7 @@ void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dat
  * bzw. abbrechen und samt halbfertiger Dateien löschen. Laufende enden kurz darauf. */
 int md_queue_topic_jobs(const char *topic);
 void md_queue_remove_topic(const char *topic);
+void md_queue_pause_topic(const char *topic, bool paused);  /* offene Aufträge der Sendung */
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
 void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
 gint64 md_job_partial_bytes(guint id);  /* Größe der halbfertigen Dateien eines Auftrags */
@@ -232,6 +238,11 @@ void md_set_encoder(MdEncoder encoder, int gpu_quality, int cpu_rf);
 MdStatus md_title_status(const MdTitle *title, const char *dir, char **path);
 /* sortiert nach Sendung, Staffel, Folge; prüft jede Datei */
 MdHistoryEntry *md_history_snapshot(int *count);
+/* wie md_history_snapshot, wartet aber nicht auf die Platte: exists ist der zuletzt geprüfte
+ * Stand, geprüft wird im Hintergrund. Ergibt die Prüfung etwas anderes, meldet das
+ * md_history_take_changed einmal mit true. */
+MdHistoryEntry *md_history_snapshot_cached(int *count);
+bool md_history_take_changed(void);
 void md_history_snapshot_free(MdHistoryEntry *entries, int count);
 void md_history_forget(const char *path);   /* Eintrag löschen, die Datei bleibt */
 /* Arbeitet ein offener Auftrag noch an dieser Datei (Zusammenführen, AV1)? */

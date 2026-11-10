@@ -109,6 +109,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm, wandelt nachträglich
   nach AV1 um (eine Datei oder alle Folgen; was schon AV1 ist, bleibt) und verschiebt Filme,
   Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
+  Ob die Dateien noch da sind, prüft das Programm im Hintergrund, die Seite wartet also nicht auf
+  die Festplatte. Folgen ohne Staffelnummer stehen hinter den Staffeln.
   Beim Löschen einer ganzen Serie verschwinden auch ihre geplanten Downloads und Umwandlungen aus
   der Warteschlange; die Rückfrage nennt, wie viele es sind.
   Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet. An „Weiterschauen“
@@ -129,7 +131,12 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Player** – spielt die Dateien im Hauptfenster, auch AV1, und läuft bevorzugt, damit nichts
   ruckelt, wenn andere Programme den Rechner auslasten (Linux: über rtkit wie PipeWire, ohne
   Administratorrechte; Windows: höhere Priorität, solange ein Video läuft). Die Suche nach
-  schwarzen Balken läuft dagegen mit niedriger Priorität. Im Vollbild verschwindet die
+  schwarzen Balken läuft dagegen mit niedriger Priorität. Unter Linux rechnet die
+  Grafikkarte das Bild für die Anzeige um (VA-API, `vapostproc`), wenn sie das kann: Im Prozessor
+  schafft ein Kern das bei 1080p mit 50 Bildern je Sekunde und 10 Bit nicht, sobald der Rechner
+  ausgelastet ist, und das Bild ruckelt. Abschalten lässt es sich unter Einstellungen → Player
+  („Bild in der Grafikkarte umrechnen“); nach einem Fehler schaltet der Player von selbst zurück.
+  Im Vollbild verschwindet die
   Titelleiste. Er merkt sich, wo eine Datei aufgehört hat, macht dort weiter und startet am Ende die
   nächste Folge. Tonspur und Untertitel lassen sich während der Wiedergabe wechseln bzw. an- und
   ausschalten. Der Zoom blendet schwarze Balken aus: „Schwarze Balken ausblenden“ sucht per ffmpeg
@@ -138,7 +145,7 @@ das Update unter Linux auch über `sudo apt upgrade`.
   und Bild ein anderes Seitenverhältnis haben oder es sich mitten im Video ändert. Das Ergebnis
   merkt sich das Programm bis zum Beenden. Tasten: Leertaste
   Pause, ←/→ 10 Sekunden (ohne Einblendung der Leiste), ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
-  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, Esc zurück, ? oder F1
+  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, I Intro überspringen, Esc zurück, ? oder F1
   blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
   Die Tooltips der Knöpfe nennen ihre Taste.
@@ -155,8 +162,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   der Folge und zweier Nachbarfolgen derselben Serie einen Audio-Fingerabdruck (Chromaprint), und
   ein Abschnitt von 15 Sekunden bis drei Minuten, der in beiden Nachbarn gleich klingt, gilt als
   Intro – auch nach einer Szene vor dem Vorspann. Anfang und Ende rücken auf den nächsten Schnitt
-  im Bild. Das dauert beim ersten Abspielen einer Folge etwa 10 bis 20 Sekunden mit niedriger
-  Priorität; das Ergebnis steht danach in `intros.tsv` im Datenordner. Voraussetzungen: Die Folge
+  im Bild. Das läuft gleich nach dem Download im Hintergrund, sonst beim ersten Abspielen, und dauert
+  etwa 10 bis 20 Sekunden mit niedriger Priorität; das Ergebnis steht danach in `intros.tsv` im Datenordner. Voraussetzungen: Die Folge
   hat eine Staffel- und Folgennummer, von der Serie ist mindestens eine weitere Folge geladen, und
   ffmpeg kann Chromaprint (sonst erscheint kein Knopf). Ganz kurze Titelkarten (unter 15 Sekunden)
   gelten nicht als Intro.
@@ -167,7 +174,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   springt ins Suchfeld, F5 lädt die aktuelle Seite neu, F1 zeigt alle Kürzel. „Erste Schritte“ im
   Menü erklärt den Ablauf in wenigen Sätzen.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
-  dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei.
+  dem Download. Standard: alles laden. Alles landet zusammen in einer MKV-Datei. Eine „Hörfassung:“
+  gilt als Tonspur mit Audiodeskription derselben Folge, nicht als eigene Folge.
 - **Pause** – einzeln oder alle. Für alle gibt es einen Knopf: Er ist farbig und heißt „Läuft“,
   solange Aufträge laufen, ein Klick pausiert alle, ein weiterer setzt sie fort. Auch nach dem Beenden oder einem Absturz geht es an derselben
   Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick. Downloads und
@@ -179,13 +187,18 @@ das Update unter Linux auch über `sudo apt upgrade`.
   entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien. Liegen dabei Reste auf der Platte,
   fragt das Programm vorher nach und nennt ihre Größe, auch beim Entfernen eines einzelnen
   Fehlschlags. Fehlermeldungen sagen, ob „Erneut versuchen“ hilft oder was sonst zu tun ist.
+  Hat eine Serie mindestens drei offene Aufträge, stehen sie unter einer Zeile mit dem Seriennamen,
+  deren Knöpfe alle pausieren, fortsetzen oder (nach Rückfrage) entfernen. Ist alles erledigt und
+  das Fenster nicht im Vordergrund, meldet das System „Warteschlange fertig“.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch („Platz sparen“ in den Einstellungen) wandelt das Programm jedes Video nach
   dem Download um, mit den Einstellungen des AV1-Converters. Die Bildqualität ist in drei Stufen
   wählbar (Gut, Sehr gut, Beste); „Eigene Werte“ zeigt die Qualitätswerte für Grafikkarte und
   Prozessor. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
   schneidet es dabei ab; ffmpeg prüft dafür jedes Schlüsselbild der ganzen Datei, ein schmaler Rand
-  bleibt stehen, und im Zweifel bleibt das Bild ganz. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  bleibt stehen, und im Zweifel bleibt das Bild ganz. Mit der Grafikkarte (Linux, VA-API) dekodiert
+  sie auch das Ausgangsvideo und schneidet dort zu; das ist etwa dreimal so schnell und entlastet
+  den Prozessor fast vollständig. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
   lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).
@@ -197,6 +210,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Knopf „Vorschau neu laden“ holt sie sofort frisch. Jede Anfrage an eine Mediathek oder an IMDb
   geht nur einmal raus: Fragen zwei Teile des Programms gleichzeitig dasselbe, wartet der zweite auf
   die Antwort des ersten, und was gerade fehlgeschlagen ist, wird zehn Minuten nicht wiederholt.
+  Gespeicherte Trefferlisten der Suche löscht das Programm beim Start nach zwei Tagen. Das
+  Protokoll wird ab 2 MB auf die neuere Hälfte gekürzt.
   Halbfertige Downloads (`.part`) bleiben beim Speicherort.
 - **Programmdaten** – Einstellungen, Verlauf, Warteschlange, Protokoll und Zwischenspeicher liegen
   zusammen in einem Ordner. In den Einstellungen lässt sich ein anderer Ordner wählen; darin

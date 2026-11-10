@@ -390,6 +390,19 @@ static bool has_title(GPtrArray *titles, const char *title)
 }
 
 /* Dieselbe Folge aus mehreren Mediatheken nur einmal; die mit Staffel bleibt */
+/* "Hörfassung: …" ist eine Tonfassung der Folge; ohne Staffel sortiert ans Ende */
+static void test_hear_version(void)
+{
+    MdTitle *t = episode_title("ZDF", "SOKO Wismar", "Hörfassung: Herzschmerz");
+    g_assert_cmpstr(t->name, ==, "Herzschmerz");
+    g_assert_cmpstr(t->track_label, ==, "Audiodeskription");
+    md_title_free(t);
+    MdHistoryEntry plain = {.topic = "SOKO", .title = "A", .season = -1, .episode = -1};
+    MdHistoryEntry first = {.topic = "SOKO", .title = "B", .season = 1, .episode = 1};
+    g_assert_cmpint(history_compare(&first, &plain), <, 0);
+    g_assert_cmpint(history_compare(&plain, &first), >, 0);
+}
+
 /* Intro: gemeinsamer Abschnitt zweier Fingerabdrücke, leicht verrauscht und versetzt */
 static void test_intro_match(void)
 {
@@ -601,6 +614,7 @@ int main(int argc, char **argv)
     g_test_add_func("/update/pruefsummen", test_update_sums);
     g_test_add_func("/suche/doppelte-folgen", test_duplicate_episodes);
     g_test_add_func("/player/intro-abschnitt", test_intro_match);
+    g_test_add_func("/suche/hoerfassung", test_hear_version);
     g_test_add_func("/av1/schwarze-balken", test_crop_bars);
 #ifndef G_OS_WIN32
     g_test_add_func("/autostart/eintrag", test_autostart);
