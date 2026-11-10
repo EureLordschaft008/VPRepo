@@ -64,6 +64,16 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.5.1 (10.11.2026)
+- Intros überspringen: Während des Vorspanns erscheint der Knopf „Intro überspringen“; mit
+  „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player von selbst weiter.
+  Erkannt wird das Intro am Ton benachbarter Folgen derselben Serie.
+- Serie löschen bricht auch ihre geplanten Downloads und Umwandlungen ab.
+- Bieten zwei Mediatheken dieselbe Folge an, wird sie nur einmal geladen; die Fassung mit Staffel
+  gewinnt, Kopien ohne Staffel werden nicht geladen.
+- Der Player läuft mit höherer Priorität und ruckelt nicht, wenn der Rechner ausgelastet ist.
+- (2.5.0 wurde nicht veröffentlicht; ein Lecktest schlug fehl.)
+
 ### 2.4.0 (08.11.2026)
 - Meine Videos zeigt, welche Serien („✓ Komplett“) und Staffeln („Staffel 2 ✓“) komplett sind.
 - Ein gemeinsamer Knopf zum Pausieren und Fortsetzen aller Aufträge; farbig, solange sie laufen.
