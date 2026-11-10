@@ -64,6 +64,10 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.6.2 (10.11.2026)
+- Windows nutzt jetzt auch die Grafikkarte: Der Player rechnet das Bild mit Direct3D 11 um, die
+  AV1-Umwandlung dekodiert das Ausgangsvideo in der Grafikkarte.
+
 ### 2.6.1 (10.11.2026)
 - Intros werden jetzt auch unter Windows erkannt; bisher fehlte dort der Knopf „Intro überspringen“.
 
