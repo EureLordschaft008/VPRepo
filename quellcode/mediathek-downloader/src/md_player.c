@@ -7,9 +7,9 @@
  * Zeit ohne Mausbewegung aus. Der Bus von GStreamer meldet sich über die GLib-Hauptschleife,
  * darum läuft alles im GTK-Hauptthread.
  *
- * Tasten: Leertaste/K Pause, ←/→ (J/L) 10 Sekunden, ↑/↓ Lautstärke, M stumm, F/F11 Vollbild,
- * N nächste Folge, A Tonspur, S Untertitel, Z schwarze Balken aus/ein, +/− Zoom, 0 ganzes Bild,
- * Esc Vollbild verlassen oder Player schließen.
+ * Tasten: siehe KEY_ACTIONS; jede Aktion hat eine Taste, die sich in den Einstellungen ändern
+ * lässt (md_player_key_set), dazu feste Zweittasten wie K/J/L, solange keine Aktion sie belegt.
+ * → springt während des Intros ans Ende des Intros statt 10 Sekunden.
  *
  * Bild im Bild: Wählt man bei laufendem Video einen anderen Reiter, zieht die Seite in ein kleines
  * Fenster über allen anderen und spielt dort weiter. Doppelklick oder der Knopf in der Leiste
@@ -76,6 +76,8 @@ typedef struct {
     GtkWidget *play, *next, *audio_button, *text_button, *fullscreen, *volume;
     GtkWidget *error_box, *error_label, *osd, *subtitle, *intro_button;
     GtkWidget *pip_window, *pip_revealer, *pip_play;  /* pip_window: NULL = im Hauptfenster */
+    GtkWidget *back_button, *forward_button, *close_button, *pip_close, *zoom_button;
+    GtkWidget *zoom_items[4];
     GtkStack *stack;
     GstElement *playbin, *sink;         /* sink: gtksink oder der Kasten mit vapostproc davor */
     GstElement *gpu[6], *gtk_sink;   /* Umrechnung in der Grafikkarte, gpu[0] NULL = im Prozessor */
@@ -108,6 +110,148 @@ typedef struct {
 static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
 static bool auto_skip_intro;
+
+/* ---------------------------------------------------------------------------
+ * Tastenbelegung
+ * ------------------------------------------------------------------------- */
+enum {
+    KEY_PLAY, KEY_BACK, KEY_FORWARD, KEY_VOLUME_UP, KEY_VOLUME_DOWN, KEY_MUTE, KEY_AUDIO,
+    KEY_TEXT, KEY_FILL, KEY_ZOOM_IN, KEY_ZOOM_OUT, KEY_ZOOM_FIT, KEY_FULLSCREEN, KEY_NEXT,
+    KEY_INTRO, KEY_CLOSE, KEY_HELP, KEY_COUNT
+};
+
+static const struct {
+    const char *id;             /* Name in der Einstellungsdatei */
+    const char *label;          /* Wirkung, wie sie Einstellungen und Übersicht nennen */
+    guint key;                  /* Standardtaste */
+    guint alt[2];               /* feste Zweittasten, 0 = keine */
+    bool quiet;                 /* blendet die Leiste nicht ein */
+} KEY_ACTIONS[KEY_COUNT] = {
+    [KEY_PLAY] = {"Abspielen", "Abspielen / Pause", GDK_KEY_space, {GDK_KEY_k}, false},
+    [KEY_BACK] = {"Zurueckspulen", "10 Sekunden zurück", GDK_KEY_Left, {GDK_KEY_j}, true},
+    [KEY_FORWARD] = {"Vorspulen", "10 Sekunden vor (im Intro: Intro überspringen)",
+                     GDK_KEY_Right, {GDK_KEY_l}, true},
+    [KEY_VOLUME_UP] = {"Lauter", "Lauter", GDK_KEY_Up, {0}, true},
+    [KEY_VOLUME_DOWN] = {"Leiser", "Leiser", GDK_KEY_Down, {0}, true},
+    [KEY_MUTE] = {"Stumm", "Stumm", GDK_KEY_m, {0}, false},
+    [KEY_AUDIO] = {"Tonspur", "Nächste Tonspur", GDK_KEY_a, {0}, true},
+    [KEY_TEXT] = {"Untertitel", "Untertitel wechseln", GDK_KEY_s, {0}, true},
+    [KEY_FILL] = {"Balken", "Schwarze Balken aus / ein", GDK_KEY_z, {0}, true},
+    [KEY_ZOOM_IN] = {"Vergroessern", "Vergrößern", GDK_KEY_plus, {GDK_KEY_KP_Add}, true},
+    [KEY_ZOOM_OUT] = {"Verkleinern", "Verkleinern", GDK_KEY_minus, {GDK_KEY_KP_Subtract}, true},
+    [KEY_ZOOM_FIT] = {"GanzesBild", "Ganzes Bild", GDK_KEY_0, {GDK_KEY_KP_0}, true},
+    [KEY_FULLSCREEN] = {"Vollbild", "Vollbild (auch Doppelklick)", GDK_KEY_f, {GDK_KEY_F11},
+                        false},
+    [KEY_NEXT] = {"NaechsteFolge", "Nächste Folge", GDK_KEY_n, {0}, false},
+    [KEY_INTRO] = {"Intro", "Intro überspringen", GDK_KEY_i, {0}, false},
+    [KEY_CLOSE] = {"Zurueck", "Zurück (im Vollbild: Vollbild verlassen)", GDK_KEY_Escape, {0},
+                   false},
+    [KEY_HELP] = {"Tastenhilfe", "Diese Übersicht", GDK_KEY_question, {GDK_KEY_F1}, true},
+};
+
+static guint key_bound[KEY_COUNT];  /* 0 = Standardtaste */
+
+static guint key_of(int action)
+{
+    return key_bound[action] ? key_bound[action] : KEY_ACTIONS[action].key;
+}
+
+int md_player_key_count(void)
+{
+    return KEY_COUNT;
+}
+
+const char *md_player_key_id(int action)
+{
+    return KEY_ACTIONS[action].id;
+}
+
+const char *md_player_key_action(int action)
+{
+    return KEY_ACTIONS[action].label;
+}
+
+guint md_player_key_get(int action)
+{
+    return key_of(action);
+}
+
+guint md_player_key_default(int action)
+{
+    return KEY_ACTIONS[action].key;
+}
+
+int md_player_key_find(guint key)
+{
+    key = gdk_keyval_to_lower(key);
+    for (int i = 0; i < KEY_COUNT; i++)
+        if (key_of(i) == key) return i;
+    return -1;
+}
+
+/* Aktion zu einer gedrückten Taste: erst die gewählten Tasten, dann die Zweittasten */
+static int key_action(guint key)
+{
+    int action = md_player_key_find(key);
+    if (action >= 0) return action;
+    key = gdk_keyval_to_lower(key);
+    for (int i = 0; i < KEY_COUNT; i++)
+        for (size_t k = 0; k < G_N_ELEMENTS(KEY_ACTIONS[i].alt); k++)
+            if (KEY_ACTIONS[i].alt[k] && KEY_ACTIONS[i].alt[k] == key) return i;
+    return -1;
+}
+
+char *md_player_key_label(guint key)
+{
+    switch (key) {
+    case GDK_KEY_Left: return g_strdup("←");
+    case GDK_KEY_Right: return g_strdup("→");
+    case GDK_KEY_Up: return g_strdup("↑");
+    case GDK_KEY_Down: return g_strdup("↓");
+    case GDK_KEY_space: return g_strdup("Leertaste");
+    case GDK_KEY_Escape: return g_strdup("Esc");
+    case GDK_KEY_Return: return g_strdup("Enter");
+    case GDK_KEY_BackSpace: return g_strdup("Rücktaste");
+    case GDK_KEY_Tab: return g_strdup("Tab");
+    case GDK_KEY_Delete: return g_strdup("Entf");
+    case GDK_KEY_Insert: return g_strdup("Einfg");
+    case GDK_KEY_Home: return g_strdup("Pos1");
+    case GDK_KEY_End: return g_strdup("Ende");
+    case GDK_KEY_Page_Up: return g_strdup("Bild↑");
+    case GDK_KEY_Page_Down: return g_strdup("Bild↓");
+    case GDK_KEY_minus: return g_strdup("−");
+    case GDK_KEY_KP_Add: return g_strdup("+ (Ziffernblock)");
+    case GDK_KEY_KP_Subtract: return g_strdup("− (Ziffernblock)");
+    default: break;
+    }
+    gunichar c = gdk_keyval_to_unicode(gdk_keyval_to_upper(key));
+    if (c > ' ') {
+        char buf[8] = {0};
+        g_unichar_to_utf8(c, buf);
+        return g_strdup(buf);
+    }
+    const char *name = gdk_keyval_name(key);
+    return g_strdup(name ? name : "?");
+}
+
+/* "Text (Taste)" für Tooltips */
+static char *key_tip(const char *text, int action)
+{
+    char *label = md_player_key_label(key_of(action));
+    char *tip = g_strdup_printf("%s (%s)", text, label);
+    g_free(label);
+    return tip;
+}
+
+static void set_key_tip(GtkWidget *widget, const char *text, int action)
+{
+    if (!widget) return;
+    char *tip = key_tip(text, action);
+    gtk_widget_set_tooltip_text(widget, tip);
+    g_free(tip);
+}
+
+static void apply_key_tips(Player *p);
 static bool gpu_convert = true;     /* Einstellung */
 static bool gpu_convert_failed;     /* hat in diesem Lauf einen Fehler ausgelöst */
 
@@ -227,9 +371,8 @@ static void update_play_button(Player *p)
         set_icon(buttons[i], p->ended ? "view-refresh-symbolic"
                              : p->playing ? "media-playback-pause-symbolic"
                              : "media-playback-start-symbolic");
-        gtk_widget_set_tooltip_text(buttons[i], p->ended ? "Noch einmal (Leertaste)"
-                                                : p->playing ? "Pause (Leertaste)"
-                                                : "Abspielen (Leertaste)");
+        set_key_tip(buttons[i], p->ended ? "Noch einmal" : p->playing ? "Pause" : "Abspielen",
+                    KEY_PLAY);
     }
 }
 
@@ -376,31 +519,43 @@ static void show_osd(Player *p, const char *text)
 
 const char *md_player_keys_text(void)
 {
-    return "Leertaste oder K\tAbspielen / Pause\n"
-           "← → oder J L\t10 Sekunden zurück / vor\n"
-           "↑ ↓\tLautstärke\n"
-           "M\tStumm\n"
-           "A\tNächste Tonspur\n"
-           "S\tUntertitel wechseln\n"
-           "Z\tSchwarze Balken aus / ein\n"
-           "+ −\tZoom\n"
-           "0\tGanzes Bild\n"
-           "F, F11 oder Doppelklick\tVollbild\n"
-           "N\tNächste Folge\n"
-           "I\tIntro überspringen\n"
-           "Esc\tZurück\n"
-           "? oder F1\tDiese Übersicht";
+    static char *text;
+    GString *s = g_string_new(NULL);
+    for (int i = 0; i < KEY_COUNT; i++) {
+        char *label = md_player_key_label(key_of(i));
+        g_string_append(s, label);
+        g_free(label);
+        /* Zweittasten nur, solange sie keiner anderen Aktion gehören */
+        for (size_t k = 0; k < G_N_ELEMENTS(KEY_ACTIONS[i].alt); k++) {
+            guint alt = KEY_ACTIONS[i].alt[k];
+            if (!alt || key_action(alt) != i || alt == key_of(i)) continue;
+            label = md_player_key_label(alt);
+            g_string_append_printf(s, " oder %s", label);
+            g_free(label);
+        }
+        g_string_append_printf(s, "\t%s%s", KEY_ACTIONS[i].label, i + 1 < KEY_COUNT ? "\n" : "");
+    }
+    g_free(text);
+    text = g_string_free(s, FALSE);
+    return text;
+}
+
+void md_player_key_set(int action, guint key)
+{
+    if (action < 0 || action >= KEY_COUNT) return;
+    key = gdk_keyval_to_lower(key);
+    key_bound[action] = key == KEY_ACTIONS[action].key ? 0 : key;
+    if (player) apply_key_tips(player);
 }
 
 /* "?": alle Tasten oben links, ein zweites "?" blendet sie aus */
 static void toggle_key_help(Player *p)
 {
     static char *text;
-    if (!text) {                                    /* Tabulatoren richten im Hinweis nichts aus */
-        char **lines = g_strsplit(md_player_keys_text(), "\t", -1);
-        text = g_strjoinv(":  ", lines);
-        g_strfreev(lines);
-    }
+    g_free(text);                                   /* Tabulatoren richten im Hinweis nichts aus */
+    char **lines = g_strsplit(md_player_keys_text(), "\t", -1);
+    text = g_strjoinv(":  ", lines);
+    g_strfreev(lines);
     if (gtk_widget_get_visible(p->osd) && !g_strcmp0(gtk_label_get_text(GTK_LABEL(p->osd)), text)) {
         if (p->osd_timer) g_source_remove(p->osd_timer);
         on_osd_timeout(p);
@@ -732,11 +887,12 @@ static void on_back_clicked(GtkButton *b, gpointer data)
     skip(p, -SEEK_STEP);
 }
 
+static void skip_forward(Player *p);
+
 static void on_forward_clicked(GtkButton *b, gpointer data)
 {
     (void)b;
-    Player *p = data;
-    skip(p, SEEK_STEP);
+    skip_forward(data);
 }
 
 static void on_next_clicked(GtkButton *b, gpointer data)
@@ -988,8 +1144,8 @@ static void build_track_menu(Player *p, bool text)
     gtk_widget_show_all(menu);
     gtk_menu_button_set_popup(GTK_MENU_BUTTON(button), menu);
     gtk_widget_set_sensitive(button, choice);
-    gtk_widget_set_tooltip_text(button, text ? (choice ? "Untertitel (S)" : "Keine Untertitel")
-                                             : (choice ? "Tonspur (A)" : "Nur eine Tonspur"));
+    if (choice) set_key_tip(button, text ? "Untertitel" : "Tonspur", text ? KEY_TEXT : KEY_AUDIO);
+    else gtk_widget_set_tooltip_text(button, text ? "Keine Untertitel" : "Nur eine Tonspur");
 }
 
 /* ---------------------------------------------------------------------------
@@ -1102,6 +1258,18 @@ static void skip_intro(Player *p)
     seek_to(p, p->intro_end, GST_SEEK_FLAG_ACCURATE);
 }
 
+/* 10 Sekunden vor; läuft gerade das Intro, gleich an sein Ende */
+static void skip_forward(Player *p)
+{
+    if (p->intro_found && p->intro_was_in) {
+        skip_intro(p);
+        p->intro_was_in = false;
+        show_osd(p, "Intro übersprungen");
+        return;
+    }
+    skip(p, SEEK_STEP);
+}
+
 static void on_intro_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
@@ -1169,9 +1337,11 @@ static void load_file(Player *p, const char *path, const char *title, double sta
     if (p->hooks.next) p->next_path = p->hooks.next(path, &p->next_title, p->hooks.data);
     gtk_widget_set_visible(p->next, p->next_path != NULL);
     if (p->next_title) {
-        char *tip = g_strdup_printf("Nächste Folge (N): %s", p->next_title);
+        char *key = key_tip("Nächste Folge", KEY_NEXT);
+        char *tip = g_strdup_printf("%s: %s", key, p->next_title);
         gtk_widget_set_tooltip_text(p->next, tip);
         g_free(tip);
+        g_free(key);
     }
     gtk_widget_set_sensitive(p->audio_button, FALSE);
     gtk_widget_set_sensitive(p->text_button, FALSE);
@@ -1194,45 +1364,41 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     Player *p = data;
     /* im kleinen Fenster gehören die Tasten des Hauptfensters wieder den anderen Seiten */
     if (w != (p->pip_window ? p->pip_window : p->toplevel)) return FALSE;
-    guint key = gdk_keyval_to_lower(e->keyval);
+    /* Zusatztasten (Strg, Alt) gehören dem Hauptfenster */
+    if (e->state & (GDK_CONTROL_MASK | GDK_MOD1_MASK | GDK_SUPER_MASK)) return FALSE;
+    int action = key_action(e->keyval);
+    if (action < 0) return FALSE;
     /* Springen, Zoom und Spurwechsel sollen das Bild nicht mit der Leiste verdecken; sie zeigen
-     * höchstens einen kurzen Hinweis */
-    static const guint QUIET[] = {GDK_KEY_Left, GDK_KEY_Right, GDK_KEY_j, GDK_KEY_l, GDK_KEY_z,
-                                  GDK_KEY_plus, GDK_KEY_KP_Add, GDK_KEY_minus,
-                                  GDK_KEY_KP_Subtract, GDK_KEY_0, GDK_KEY_KP_0, GDK_KEY_a,
-                                  GDK_KEY_s, GDK_KEY_Up, GDK_KEY_Down, GDK_KEY_question,
-                                  GDK_KEY_F1};
-    bool quiet = false;
-    for (size_t i = 0; i < G_N_ELEMENTS(QUIET); i++) quiet |= key == QUIET[i];
-    /* die Hand am Touchpad oder ein vom System gemeldetes Mausereignis während des Tippens soll
-     * die Leiste nicht zeigen: Bewegung zählt erst wieder ab der jetzigen Mausstelle */
+     * höchstens einen kurzen Hinweis. Die Hand am Touchpad oder ein vom System gemeldetes
+     * Mausereignis während des Tippens soll die Leiste auch nicht zeigen: Bewegung zählt erst
+     * wieder ab der jetzigen Mausstelle */
     p->pointer_known = false;
-    if (!quiet) show_bar(p);
-    switch (key) {
-    case GDK_KEY_space: case GDK_KEY_k: toggle_play(p); break;
-    case GDK_KEY_Left: case GDK_KEY_j: skip(p, -SEEK_STEP); break;
-    case GDK_KEY_Right: case GDK_KEY_l: skip(p, SEEK_STEP); break;
-    case GDK_KEY_Up: change_volume(p, VOLUME_STEP); break;
-    case GDK_KEY_Down: change_volume(p, -VOLUME_STEP); break;
-    case GDK_KEY_f: case GDK_KEY_F11: toggle_fullscreen(p); break;
-    case GDK_KEY_n: play_next(p); break;
-    case GDK_KEY_i:
+    if (!KEY_ACTIONS[action].quiet) show_bar(p);
+    switch (action) {
+    case KEY_PLAY: toggle_play(p); break;
+    case KEY_BACK: skip(p, -SEEK_STEP); break;
+    case KEY_FORWARD: skip_forward(p); break;
+    case KEY_VOLUME_UP: change_volume(p, VOLUME_STEP); break;
+    case KEY_VOLUME_DOWN: change_volume(p, -VOLUME_STEP); break;
+    case KEY_FULLSCREEN: toggle_fullscreen(p); break;
+    case KEY_NEXT: play_next(p); break;
+    case KEY_INTRO:
         if (p->intro_was_in) skip_intro(p);
         break;
-    case GDK_KEY_a: next_audio(p); break;
-    case GDK_KEY_s: next_text(p); break;
-    case GDK_KEY_z: set_fill(p, !p->fill); break;
-    case GDK_KEY_plus: case GDK_KEY_KP_Add: zoom_by(p, ZOOM_STEP); break;
-    case GDK_KEY_minus: case GDK_KEY_KP_Subtract: zoom_by(p, 1 / ZOOM_STEP); break;
-    case GDK_KEY_0: case GDK_KEY_KP_0: set_fill(p, false); break;
-    case GDK_KEY_question: case GDK_KEY_F1: toggle_key_help(p); break;
-    case GDK_KEY_m: {
+    case KEY_AUDIO: next_audio(p); break;
+    case KEY_TEXT: next_text(p); break;
+    case KEY_FILL: set_fill(p, !p->fill); break;
+    case KEY_ZOOM_IN: zoom_by(p, ZOOM_STEP); break;
+    case KEY_ZOOM_OUT: zoom_by(p, 1 / ZOOM_STEP); break;
+    case KEY_ZOOM_FIT: set_fill(p, false); break;
+    case KEY_HELP: toggle_key_help(p); break;
+    case KEY_MUTE: {
         gboolean mute = FALSE;
         g_object_get(p->playbin, "mute", &mute, NULL);
         g_object_set(p->playbin, "mute", !mute, NULL);
         break;
     }
-    case GDK_KEY_Escape:
+    case KEY_CLOSE:
         if (p->is_fullscreen) gtk_window_unfullscreen(GTK_WINDOW(p->toplevel));
         else md_player_close();
         break;
@@ -1371,7 +1537,8 @@ static GtkWidget *build_pip_bar(Player *p)
     g_signal_connect(p->pip_play, "clicked", G_CALLBACK(on_play_clicked), p);
     GtkWidget *restore = new_bar_button("window-maximize-symbolic", "Im Hauptfenster zeigen");
     g_signal_connect(restore, "clicked", G_CALLBACK(on_pip_restore_clicked), p);
-    GtkWidget *close = new_bar_button("window-close-symbolic", "Schließen (Esc)");
+    GtkWidget *close = new_bar_button("window-close-symbolic", NULL);
+    p->pip_close = close;
     g_signal_connect(close, "clicked", G_CALLBACK(on_close_clicked), p);
     gtk_box_pack_start(GTK_BOX(bar), p->pip_play, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar), restore, FALSE, FALSE, 0);
@@ -1436,16 +1603,16 @@ static GtkWidget *build_bar(Player *p)
     gtk_box_pack_start(GTK_BOX(bar), p->scale, FALSE, FALSE, 0);
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    GtkWidget *close = new_bar_button("go-previous-symbolic", "Zurück (Esc)");
+    GtkWidget *close = p->close_button = new_bar_button("go-previous-symbolic", NULL);
     g_signal_connect(close, "clicked", G_CALLBACK(on_close_clicked), p);
     gtk_box_pack_start(GTK_BOX(row), close, FALSE, FALSE, 0);
-    p->play = new_bar_button("media-playback-start-symbolic", "Abspielen (Leertaste)");
+    p->play = new_bar_button("media-playback-start-symbolic", NULL);
     g_signal_connect(p->play, "clicked", G_CALLBACK(on_play_clicked), p);
-    GtkWidget *back = new_bar_button("media-seek-backward-symbolic", "10 Sekunden zurück (←)");
+    GtkWidget *back = p->back_button = new_bar_button("media-seek-backward-symbolic", NULL);
     g_signal_connect(back, "clicked", G_CALLBACK(on_back_clicked), p);
-    GtkWidget *forward = new_bar_button("media-seek-forward-symbolic", "10 Sekunden vor (→)");
+    GtkWidget *forward = p->forward_button = new_bar_button("media-seek-forward-symbolic", NULL);
     g_signal_connect(forward, "clicked", G_CALLBACK(on_forward_clicked), p);
-    p->next = new_bar_button("media-skip-forward-symbolic", "Nächste Folge (N)");
+    p->next = new_bar_button("media-skip-forward-symbolic", NULL);
     gtk_widget_set_no_show_all(p->next, TRUE);
     g_signal_connect(p->next, "clicked", G_CALLBACK(on_next_clicked), p);
     p->time_label = gtk_label_new("");
@@ -1468,13 +1635,11 @@ static GtkWidget *build_bar(Player *p)
                          gtk_image_new_from_icon_name("audio-x-generic-symbolic",
                                                       GTK_ICON_SIZE_LARGE_TOOLBAR));
     gtk_button_set_relief(GTK_BUTTON(p->audio_button), GTK_RELIEF_NONE);
-    gtk_widget_set_tooltip_text(p->audio_button, "Tonspur (A)");
     p->text_button = gtk_menu_button_new();
     gtk_button_set_image(GTK_BUTTON(p->text_button),
                          gtk_image_new_from_icon_name("media-view-subtitles-symbolic",
                                                       GTK_ICON_SIZE_LARGE_TOOLBAR));
     gtk_button_set_relief(GTK_BUTTON(p->text_button), GTK_RELIEF_NONE);
-    gtk_widget_set_tooltip_text(p->text_button, "Untertitel (S)");
     gtk_widget_set_can_focus(p->audio_button, FALSE);
     gtk_widget_set_can_focus(p->text_button, FALSE);
     GtkWidget *zoom = gtk_menu_button_new();
@@ -1482,18 +1647,19 @@ static GtkWidget *build_bar(Player *p)
                          gtk_image_new_from_icon_name("zoom-fit-best-symbolic",
                                                       GTK_ICON_SIZE_LARGE_TOOLBAR));
     gtk_button_set_relief(GTK_BUTTON(zoom), GTK_RELIEF_NONE);
-    gtk_widget_set_tooltip_text(zoom, "Zoom und schwarze Balken (Z, +, −, 0)");
+    p->zoom_button = zoom;
     gtk_widget_set_can_focus(zoom, FALSE);
     GtkWidget *zoom_menu = gtk_menu_new();
     static const struct {
         const char *label;
         GCallback handler;
-    } ZOOM_ITEMS[] = {{"Ganzes Bild (0)", G_CALLBACK(on_zoom_fit)},
-                      {"Schwarze Balken ausblenden (Z)", G_CALLBACK(on_zoom_fill)},
-                      {"Vergrößern (+)", G_CALLBACK(on_zoom_in)},
-                      {"Verkleinern (−)", G_CALLBACK(on_zoom_out)}};
+    } ZOOM_ITEMS[] = {{"Ganzes Bild", G_CALLBACK(on_zoom_fit)},
+                      {"Schwarze Balken ausblenden", G_CALLBACK(on_zoom_fill)},
+                      {"Vergrößern", G_CALLBACK(on_zoom_in)},
+                      {"Verkleinern", G_CALLBACK(on_zoom_out)}};
+    G_STATIC_ASSERT(G_N_ELEMENTS(ZOOM_ITEMS) == G_N_ELEMENTS(p->zoom_items));
     for (size_t i = 0; i < G_N_ELEMENTS(ZOOM_ITEMS); i++) {
-        GtkWidget *item = gtk_menu_item_new_with_label(ZOOM_ITEMS[i].label);
+        GtkWidget *item = p->zoom_items[i] = gtk_menu_item_new_with_label(ZOOM_ITEMS[i].label);
         g_signal_connect(item, "activate", ZOOM_ITEMS[i].handler, p);
         gtk_menu_shell_append(GTK_MENU_SHELL(zoom_menu), item);
     }
@@ -1503,9 +1669,8 @@ static GtkWidget *build_bar(Player *p)
     gtk_scale_button_set_value(GTK_SCALE_BUTTON(p->volume), last_volume);
     gtk_widget_set_can_focus(p->volume, FALSE);
     /* GtkVolumeButton zeigt sonst nur den Prozentwert */
-    gtk_widget_set_tooltip_text(p->volume, "Lautstärke (↑/↓, M schaltet stumm)");
     g_signal_connect(p->volume, "value-changed", G_CALLBACK(on_volume_changed), p);
-    p->fullscreen = new_bar_button("view-fullscreen-symbolic", "Vollbild (F)");
+    p->fullscreen = new_bar_button("view-fullscreen-symbolic", NULL);
     g_signal_connect(p->fullscreen, "clicked", G_CALLBACK(on_fullscreen_clicked), p);
     gtk_box_pack_end(GTK_BOX(row), p->fullscreen, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(row), p->volume, FALSE, FALSE, 0);
@@ -1637,6 +1802,59 @@ static void drop_gpu_convert(Player *p)
     gst_object_unref(ghost);
 }
 
+/* Tooltips und Menüeinträge nennen die gewählten Tasten */
+static void apply_key_tips(Player *p)
+{
+    set_key_tip(p->close_button, "Zurück", KEY_CLOSE);
+    set_key_tip(p->pip_close, "Schließen", KEY_CLOSE);
+    set_key_tip(p->back_button, "10 Sekunden zurück", KEY_BACK);
+    set_key_tip(p->forward_button, "10 Sekunden vor", KEY_FORWARD);
+    set_key_tip(p->fullscreen, "Vollbild", KEY_FULLSCREEN);
+    set_key_tip(p->intro_button, "Intro überspringen", KEY_INTRO);
+    update_play_button(p);
+    if (!p->next_title) set_key_tip(p->next, "Nächste Folge", KEY_NEXT);
+    else {
+        char *key = key_tip("Nächste Folge", KEY_NEXT);
+        char *tip = g_strdup_printf("%s: %s", key, p->next_title);
+        gtk_widget_set_tooltip_text(p->next, tip);
+        g_free(tip);
+        g_free(key);
+    }
+    if (gtk_widget_get_sensitive(p->audio_button)) set_key_tip(p->audio_button, "Tonspur", KEY_AUDIO);
+    else gtk_widget_set_tooltip_text(p->audio_button, "Tonspur");
+    if (gtk_widget_get_sensitive(p->text_button)) set_key_tip(p->text_button, "Untertitel", KEY_TEXT);
+    else gtk_widget_set_tooltip_text(p->text_button, "Untertitel");
+    char *fill = md_player_key_label(key_of(KEY_FILL)), *in = md_player_key_label(key_of(KEY_ZOOM_IN));
+    char *out = md_player_key_label(key_of(KEY_ZOOM_OUT));
+    char *fit = md_player_key_label(key_of(KEY_ZOOM_FIT));
+    char *tip = g_strdup_printf("Zoom und schwarze Balken (%s, %s, %s, %s)", fill, in, out, fit);
+    gtk_widget_set_tooltip_text(p->zoom_button, tip);
+    g_free(tip);
+    g_free(fill);
+    g_free(in);
+    g_free(out);
+    g_free(fit);
+    static const struct {
+        const char *text;
+        int action;
+    } ITEMS[] = {{"Ganzes Bild", KEY_ZOOM_FIT}, {"Schwarze Balken ausblenden", KEY_FILL},
+                 {"Vergrößern", KEY_ZOOM_IN}, {"Verkleinern", KEY_ZOOM_OUT}};
+    for (size_t i = 0; i < G_N_ELEMENTS(ITEMS) && p->zoom_items[i]; i++) {
+        char *label = key_tip(ITEMS[i].text, ITEMS[i].action);
+        gtk_menu_item_set_label(GTK_MENU_ITEM(p->zoom_items[i]), label);
+        g_free(label);
+    }
+    char *up = md_player_key_label(key_of(KEY_VOLUME_UP));
+    char *down = md_player_key_label(key_of(KEY_VOLUME_DOWN));
+    char *mute = md_player_key_label(key_of(KEY_MUTE));
+    tip = g_strdup_printf("Lautstärke (%s/%s, %s schaltet stumm)", up, down, mute);
+    gtk_widget_set_tooltip_text(p->volume, tip);
+    g_free(tip);
+    g_free(up);
+    g_free(down);
+    g_free(mute);
+}
+
 /* Seite samt Pipeline anlegen; NULL = GStreamer fehlt */
 static Player *player_new(GtkStack *stack)
 {
@@ -1713,13 +1931,14 @@ static Player *player_new(GtkStack *stack)
     gtk_style_context_add_class(gtk_widget_get_style_context(p->intro_button), "osd");
     gtk_style_context_add_class(gtk_widget_get_style_context(p->intro_button), "zd-player-skip");
     gtk_widget_set_can_focus(p->intro_button, FALSE);
-    gtk_widget_set_halign(p->intro_button, GTK_ALIGN_END);
+    gtk_widget_set_halign(p->intro_button, GTK_ALIGN_START);
     gtk_widget_set_valign(p->intro_button, GTK_ALIGN_END);
-    gtk_widget_set_margin_end(p->intro_button, 24);
+    gtk_widget_set_margin_start(p->intro_button, 24);
     gtk_widget_set_margin_bottom(p->intro_button, 90);
     gtk_widget_set_no_show_all(p->intro_button, TRUE);
     g_signal_connect(p->intro_button, "clicked", G_CALLBACK(on_intro_clicked), p);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->intro_button);
+    apply_key_tips(p);
     /* Klicks gehen durch den Text hindurch ans Bild */
     gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->subtitle, TRUE);
     gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->osd, TRUE);

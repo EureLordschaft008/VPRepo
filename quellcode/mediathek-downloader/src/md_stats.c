@@ -84,6 +84,15 @@ bool md_stats_load(void)
     return true;
 }
 
+/* alles Erfasste vergessen; die leere Datei verhindert, dass der Wiedergabestand beim nächsten
+ * Start wieder als Sehzeit zählt */
+void md_stats_reset(void)
+{
+    if (rows) g_hash_table_remove_all(rows);
+    else rows = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, row_free);
+    md_stats_save();
+}
+
 void md_stats_save(void)
 {
     if (!rows) return;

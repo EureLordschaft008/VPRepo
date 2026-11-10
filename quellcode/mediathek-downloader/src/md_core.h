@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.6.2"
+#define MD_VERSION "2.7.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -227,6 +227,8 @@ void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehme
 void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
 gint64 md_job_partial_bytes(guint id);  /* Größe der halbfertigen Dateien eines Auftrags */
 gint64 md_queue_failed_bytes(int *count); /* dasselbe für alle Fehlschläge, count = Anzahl */
+/* Hörfassungen ohne Bildfassung, Podcasts und Radio-Talks aus allen Suchen heraushalten */
+void md_set_hide_audio(bool hide);
 void md_set_rate_limit(gint64 bytes_per_second);    /* 0 = unbegrenzt, gilt sofort */
 void md_set_parallel(int downloads, int conversions);
 /* Encoder für alle offenen Aufträge; eine laufende Umwandlung bleibt, wie sie ist */

@@ -90,10 +90,11 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Was ist schon da?** – Jede Folge trägt ihren Stand: *Geladen*, *In Warteschlange*, *Angefangen*
   oder *Datei fehlt*. Serien und Staffeln zeigen „2 von 265 geladen“. Der Filter oben blendet alles
   außer den fehlenden oder den geladenen Titeln aus.
-- **Neue Folgen** – die gleichnamige Seite listet alle Serien, von denen du schon etwas geladen hast
+- **Neue Folgen** – oben in „Meine Videos“ stehen alle Serien, von denen du schon etwas geladen hast
   und die seit dem letzten Download neue Folgen bekommen haben, auch wenn sie nicht in der Vorschau
-  stehen. Ein Klick wählt alle aus, „Herunterladen“ startet sie. In der Vorschau markiert
-  ein kleines grünes „!“ dieselben Serien. Während der Suche zeigt die Seite, welche Serie gerade
+  stehen; ein Punkt am Reiter zeigt, dass es welche gibt. Je Serie eine Zeile, aufklappbar bis zur
+  Folge. Ein Klick wählt alle aus, „Herunterladen“ unten startet sie. In der Vorschau markiert
+  ein kleines grünes „!“ dieselben Serien. Während der Suche zeigt der Abschnitt, welche Serie gerade
   dran ist und wie weit es ist; ein Spinner in der Titelleiste zeigt es auf allen Seiten. Mit
   „Neue Folgen automatisch laden“ (Einstellungen) kommen sie von selbst in die Warteschlange, mit
   allen Sprachen und Untertiteln; gesucht wird beim Start und danach alle sechs Stunden.
@@ -127,7 +128,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Stück, die meistgesehenen Titel, was wann geladen wurde, die meistgeladenen Serien, der Platz auf
   der Festplatte, wie viel davon schon gesehen ist, und die größten Dateien. Sehzeit zählt nur im
   eingebauten Player und nur, was wirklich lief; sie liegt in `sehzeit.tsv` im Datenordner und
-  bleibt, auch wenn die Datei gelöscht wird.
+  bleibt, auch wenn die Datei gelöscht wird. „Statistik zurücksetzen“ löscht nach einer Rückfrage
+  die erfasste Sehzeit; Downloads und Platz zählen weiter, denn sie kommen aus den Dateien.
 - **Player** – spielt die Dateien im Hauptfenster, auch AV1, und läuft bevorzugt, damit nichts
   ruckelt, wenn andere Programme den Rechner auslasten (Linux: über rtkit wie PipeWire, ohne
   Administratorrechte; Windows: höhere Priorität, solange ein Video läuft). Die Suche nach
@@ -148,15 +150,18 @@ das Update unter Linux auch über `sudo apt upgrade`.
   0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, I Intro überspringen, Esc zurück, ? oder F1
   blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
-  Die Tooltips der Knöpfe nennen ihre Taste.
+  Die Tooltips der Knöpfe nennen ihre Taste. Jede Taste lässt sich unter Einstellungen → „Tasten
+  im Player“ ändern: Klick auf die Taste, dann die neue drücken; gehört sie schon einer anderen
+  Aktion, tauschen die beiden, und „Standard“ stellt alles zurück. Übersicht und Tooltips nennen
+  danach die neuen Tasten.
   Gesprungen wird ohne Wartezeit zum nächstgelegenen Schlüsselbild; in AV1-Dateien dieses Programms
   liegt alle 10 Sekunden eines, ein Sprung ist dort also 5 bis 15 Sekunden weit. Das Mausrad
   verstellt die Zeitleiste nicht. Wählt man bei laufendem Video einen anderen Reiter, spielt es in
   einem kleinen Fenster über allen anderen weiter (Bild im Bild); Doppelklick oder der Knopf in
   dessen Leiste holt es zurück. Ab 95 % gilt eine Datei als gesehen. Der Stand liegt in
   `wiedergabe.tsv` im Datenordner.
-  **Intros:** Läuft der Vorspann einer Serienfolge, erscheint unten rechts der Knopf „Intro
-  überspringen“. Mit „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player
+  **Intros:** Läuft der Vorspann einer Serienfolge, erscheint unten links der Knopf „Intro
+  überspringen“; → (10 Sekunden vor) springt dann ebenfalls ans Ende des Intros. Mit „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player
   von selbst ans Ende und zeigt kurz „Intro übersprungen“; wer danach zurück ins Intro spult, sieht
   es. Erkannt wird das Intro wie bei Jellyfin am Ton: Für die ersten zehn Minuten der Folge und
   zweier Nachbarfolgen derselben Serie entsteht ein Audio-Fingerabdruck (Chromaprint), und
@@ -170,7 +175,7 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.
-- **Tastenkürzel** – Strg+1 bis Strg+6 wählen die Reiter, Strg+Bild↑/↓ blättert durch sie, Strg+F
+- **Tastenkürzel** – Strg+1 bis Strg+5 wählen die Reiter, Strg+Bild↑/↓ blättert durch sie, Strg+F
   springt ins Suchfeld, F5 lädt die aktuelle Seite neu, F1 zeigt alle Kürzel. „Erste Schritte“ im
   Menü erklärt den Ablauf in wenigen Sätzen.
 - **Sprachen und Untertitel** – Gibt es mehrere Tonspuren oder Untertitel, fragt das Programm vor
@@ -189,7 +194,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Fehlschlags. Fehlermeldungen sagen, ob „Erneut versuchen“ hilft oder was sonst zu tun ist.
   Hat eine Serie mindestens drei offene Aufträge, stehen sie unter einer Zeile mit dem Seriennamen,
   deren Knöpfe alle pausieren, fortsetzen oder (nach Rückfrage) entfernen. Ist alles erledigt und
-  das Fenster nicht im Vordergrund, meldet das System „Warteschlange fertig“.
+  das Fenster nicht im Vordergrund, meldet das System „Warteschlange fertig“. Der Reiter selbst
+  zeigt die Zahl der offenen Aufträge und ob sie gerade laufen, angehalten sind oder warten.
 - **Tempolimit** – gilt für alle Downloads zusammen und sofort, auch mitten im Download.
 - **AV1** – auf Wunsch („Platz sparen“ in den Einstellungen) wandelt das Programm jedes Video nach
   dem Download um, mit den Einstellungen des AV1-Converters. Die Bildqualität ist in drei Stufen
@@ -280,6 +286,9 @@ Umwandlung läuft mit den alten Werten zu Ende. Scheitert die GPU, übernimmt di
   unter „Einzelne Sendungen“.
 - **Fassungen mit Gebärdensprache** sind eigene Einträge, weil die Einblendung fest im Bild ist.
   Sie sind ausgeblendet und lassen sich in den Einstellungen einschalten.
+- **Reine Audio-Inhalte** blendet die Einstellung „Reine Audio-Inhalte ausblenden“ aus: Hörfassungen,
+  zu denen es keine Bildfassung gibt, sowie Podcasts und Radio-Talks (erkannt am Namen;
+  Videopodcasts bleiben). Die Audiodeskription als Tonspur einer normalen Fassung bleibt wählbar.
 - **Titelbilder** kommen von den Seiten der Mediatheken. Eine Serie zeigt das Bild ihrer neuesten
   Folge. Viele ältere Titel haben keine Seite mehr, nur noch das Video; ihr Standbild kann
   unpassend sein.

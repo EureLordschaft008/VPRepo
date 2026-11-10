@@ -1236,6 +1236,29 @@ static bool fetch_all(const char *channel, const char *text, const char *field, 
     return true;
 }
 
+static gint hide_audio;          /* reine Tonfassungen, Podcasts und Radio ausblenden */
+
+void md_set_hide_audio(bool hide)
+{
+    g_atomic_int_set(&hide_audio, hide);
+}
+
+/* Nur Ton: eine Hörfassung ohne Hauptfassung daneben (die wäre nach merge_variants schon
+ * aufgegangen) oder eine Sendung, die schon im Namen Podcast oder Radio ist. "Videopodcast"
+ * hat ein Bild und bleibt. */
+static bool title_audio_only(const MdTitle *t)
+{
+    static GRegex *audio_names;
+    if (g_once_init_enter(&audio_names)) {
+        GRegex *r = g_regex_new("(?<!video)podcast|\\bradio ?(eins|zwei|drei|\\d)\\b",
+                                G_REGEX_CASELESS | G_REGEX_OPTIMIZE, 0, NULL);
+        g_once_init_leave(&audio_names, r);
+    }
+    if (t->track_label && !strcmp(t->track_label, "Audiodeskription")) return true;
+    return g_regex_match(audio_names, t->topic, 0, NULL) ||
+           g_regex_match(audio_names, t->name, 0, NULL);
+}
+
 /* Eintrag anzeigen? (Filter, die die API nicht kennt) */
 static bool title_matches(const MdTitle *t, const MdQuery *query)
 {
@@ -1243,6 +1266,7 @@ static bool title_matches(const MdTitle *t, const MdQuery *query)
     if (!*t->url_high && !*t->url_medium && !*t->url_low) return false;
     if (t->duration < query->min_minutes * 60 && t->source != MD_SOURCE_NETZKINO) return false;
     if (query->hide_variants && t->is_variant) return false;
+    if (g_atomic_int_get(&hide_audio) && title_audio_only(t)) return false;
     if (query->kind == MD_KIND_FILMS && !t->is_film) return false;
     if (query->kind == MD_KIND_SERIES && (t->is_film ||
                                           (t->season < 0 && (t->source & ZDF_STYLE))))

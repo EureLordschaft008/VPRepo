@@ -45,7 +45,18 @@ void md_player_set_gpu_convert(bool on);
 bool md_player_gpu_convert_possible(void);
 /* Erkannte Intros von selbst überspringen statt nur den Knopf zu zeigen */
 void md_player_set_auto_skip_intro(bool on);
-/* Tasten des Players, je Zeile "Taste\tWirkung" */
+/* Tasten des Players, je Zeile "Taste\tWirkung"; gilt bis zum nächsten Aufruf */
 const char *md_player_keys_text(void);
+/* Tastenbelegung: Aktionen 0 … count−1 mit Namen für die Einstellungsdatei (id), Wirkung,
+ * gewählter und Standardtaste. find: Aktion mit dieser Taste oder −1. label: Name der Taste zum
+ * Anzeigen (g_free). set: neue Taste, gilt sofort; die Standardtaste setzt zurück. */
+int md_player_key_count(void);
+const char *md_player_key_id(int action);
+const char *md_player_key_action(int action);
+guint md_player_key_get(int action);
+guint md_player_key_default(int action);
+int md_player_key_find(guint key);
+char *md_player_key_label(guint key);
+void md_player_key_set(int action, guint key);
 
 #endif

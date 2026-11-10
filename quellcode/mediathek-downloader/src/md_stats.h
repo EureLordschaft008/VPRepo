@@ -24,6 +24,8 @@ typedef struct {
 /* Protokoll laden; false = gab es noch nicht */
 bool md_stats_load(void);
 void md_stats_save(void);
+/* Sehzeit komplett löschen (auch in der Datei) */
+void md_stats_reset(void);
 /* Sehzeit buchen; when = Unix-Zeit, zu der geschaut wurde */
 void md_stats_add(const char *name, bool film, gint64 when, double seconds, int starts,
                   int finished);

@@ -403,6 +403,27 @@ static void test_hear_version(void)
     g_assert_cmpint(history_compare(&plain, &first), >, 0);
 }
 
+/* Nur Ton: Hörfassung allein, Podcast, Radio-Talk – aber kein Videopodcast und kein
+ * "Radio Bremen" mit Filmen */
+static void test_audio_only(void)
+{
+    MdTitle *hear = episode_title("ZDF", "SOKO Wismar", "Hörfassung: Herzschmerz");
+    MdTitle *pod = episode_title("ARD", "Verurteilt! - Der Gerichtspodcast", "Folge 1");
+    MdTitle *radio = episode_title("ARD", "Der radioeins Kommentatoren Talk", "Folge 2");
+    MdTitle *video = episode_title("ARD", "FUSSBALL 2000 - der Eintracht-Videopodcast", "F 3");
+    MdTitle *bremen = episode_title("ARD", "Radio Bremen Retro - Filme aus dem Archiv",
+                                    "Ein Film");
+    MdTitle *plain = episode_title("ZDF", "SOKO Wismar", "Herzschmerz");
+    g_assert_true(title_audio_only(hear));
+    g_assert_true(title_audio_only(pod));
+    g_assert_true(title_audio_only(radio));
+    g_assert_false(title_audio_only(video));
+    g_assert_false(title_audio_only(bremen));
+    g_assert_false(title_audio_only(plain));
+    MdTitle *all[] = {hear, pod, radio, video, bremen, plain};
+    for (size_t i = 0; i < G_N_ELEMENTS(all); i++) md_title_free(all[i]);
+}
+
 /* Intro: gemeinsamer Abschnitt zweier Fingerabdrücke, leicht verrauscht und versetzt */
 static void test_intro_match(void)
 {
@@ -615,6 +636,7 @@ int main(int argc, char **argv)
     g_test_add_func("/suche/doppelte-folgen", test_duplicate_episodes);
     g_test_add_func("/player/intro-abschnitt", test_intro_match);
     g_test_add_func("/suche/hoerfassung", test_hear_version);
+    g_test_add_func("/suche/nur-ton", test_audio_only);
     g_test_add_func("/av1/schwarze-balken", test_crop_bars);
 #ifndef G_OS_WIN32
     g_test_add_func("/autostart/eintrag", test_autostart);
