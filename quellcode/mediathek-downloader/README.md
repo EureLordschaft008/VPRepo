@@ -131,8 +131,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Player** – spielt die Dateien im Hauptfenster, auch AV1, und läuft bevorzugt, damit nichts
   ruckelt, wenn andere Programme den Rechner auslasten (Linux: über rtkit wie PipeWire, ohne
   Administratorrechte; Windows: höhere Priorität, solange ein Video läuft). Die Suche nach
-  schwarzen Balken läuft dagegen mit niedriger Priorität. Unter Linux rechnet die
-  Grafikkarte das Bild für die Anzeige um (VA-API, `vapostproc`), wenn sie das kann: Im Prozessor
+  schwarzen Balken läuft dagegen mit niedriger Priorität. Die Grafikkarte rechnet
+  das Bild für die Anzeige um (Linux: VA-API, `vapostproc`; Windows: Direct3D 11), wenn sie das kann: Im Prozessor
   schafft ein Kern das bei 1080p mit 50 Bildern je Sekunde und 10 Bit nicht, sobald der Rechner
   ausgelastet ist, und das Bild ruckelt. Abschalten lässt es sich unter Einstellungen → Player
   („Bild in der Grafikkarte umrechnen“); nach einem Fehler schaltet der Player von selbst zurück.
@@ -196,9 +196,9 @@ das Update unter Linux auch über `sudo apt upgrade`.
   wählbar (Gut, Sehr gut, Beste); „Eigene Werte“ zeigt die Qualitätswerte für Grafikkarte und
   Prozessor. Schwarze Balken, die fest im Bild sind (etwa bei 4:3-Serien oder Kinofilmen),
   schneidet es dabei ab; ffmpeg prüft dafür jedes Schlüsselbild der ganzen Datei, ein schmaler Rand
-  bleibt stehen, und im Zweifel bleibt das Bild ganz. Mit der Grafikkarte (Linux, VA-API) dekodiert
-  sie auch das Ausgangsvideo und schneidet dort zu; das ist etwa dreimal so schnell und entlastet
-  den Prozessor fast vollständig. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  bleibt stehen, und im Zweifel bleibt das Bild ganz. Mit der Grafikkarte dekodiert sie auch das
+  Ausgangsvideo: unter Linux per VA-API samt Zuschneiden, etwa dreimal so schnell und fast ohne
+  Last für den Prozessor; unter Windows per D3D11VA, DXVA2 oder CUDA, was die Karte kann. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
   lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).

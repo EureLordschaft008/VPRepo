@@ -78,7 +78,8 @@ typedef struct {
     GtkWidget *pip_window, *pip_revealer, *pip_play;  /* pip_window: NULL = im Hauptfenster */
     GtkStack *stack;
     GstElement *playbin, *sink;         /* sink: gtksink oder der Kasten mit vapostproc davor */
-    GstElement *vpp, *vpp_filter, *gtk_sink;    /* vpp: NULL = Umrechnung im Prozessor */
+    GstElement *gpu[6], *gtk_sink;   /* Umrechnung in der Grafikkarte, gpu[0] NULL = im Prozessor */
+    int gpu_count;
     char *path, *title, *next_path, *next_title;
     double start, duration;
     double video_width, video_height;   /* Bildgröße samt Pixelseitenverhältnis, 0 = unbekannt */
@@ -1064,7 +1065,7 @@ static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
     case GST_MESSAGE_ERROR: {
         GError *err = NULL;
         gst_message_parse_error(message, &err, NULL);
-        if (p->vpp && p->path) {
+        if (p->gpu_count && p->path) {
             /* vielleicht liegt es an der Umrechnung in der Grafikkarte: einmal ohne versuchen */
             md_log("Player: Fehler mit Umrechnung in der Grafikkarte (%s), weiter ohne",
                    err ? err->message : "?");
@@ -1547,40 +1548,77 @@ static void load_css(void)
     g_object_unref(css);
 }
 
+/* Umrechnung in der Grafikkarte: Linux VA-API, Windows Direct3D 11. d3d11convert arbeitet nur im
+ * Grafikspeicher, darum dort mit Hoch- und Herunterladen. GPU_FACTORY zeigt, ob es sie gibt.
+ * Die Elemente liegen einzeln im Bild-Bin: in einem eigenen Bin verschachtelt kam unter Linux
+ * kein Bild an. */
+#ifdef G_OS_WIN32
+#define GPU_FACTORY "d3d11convert"
+#define GPU_FORMAT "BGRA"
+#define GPU_NAME "Direct3D 11"
+#define GPU_TEST 1                  /* d3d11convert */
+#else
+#define GPU_FACTORY "vapostproc"
+#define GPU_FORMAT "BGRx"
+#define GPU_NAME "VA-API"
+#define GPU_TEST 0                  /* vapostproc */
+#endif
+
+static GstElement *caps_filter(const char *caps_text)
+{
+    GstElement *filter = gst_element_factory_make("capsfilter", NULL);
+    GstCaps *caps = gst_caps_from_string(caps_text);
+    if (filter && caps) g_object_set(filter, "caps", caps, NULL);
+    if (caps) gst_caps_unref(caps);
+    return filter;
+}
+
 /* gtksink nimmt nur BGRx/BGRA im Hauptspeicher. Die Umrechnung dorthin macht playbin sonst mit
  * videoconvert auf einem einzigen Prozessorkern: Bei 1080p50 mit 10 Bit schafft der unter Last
  * keine 30 Bilder je Sekunde, das Bild ruckelt. Mit VA-API rechnet die Grafikkarte um
- * (vapostproc), gemessen gut dreimal so schnell. Rückgabe: was playbin als Bildausgabe bekommt. */
+ * (vapostproc), gemessen gut dreimal so schnell; unter Windows ebenso mit Direct3D 11.
+ * Rückgabe: was playbin als Bildausgabe bekommt. */
 static GstElement *wrap_gpu_convert(Player *p, GstElement *sink)
 {
     p->gtk_sink = sink;
     if (!gpu_convert || gpu_convert_failed) return sink;
-    GstElement *vpp = gst_element_factory_make("vapostproc", NULL);
-    if (!vpp) return sink;
+    GstElement *e[G_N_ELEMENTS(p->gpu)] = {NULL};
+    int n = 0;
+#ifdef G_OS_WIN32
+    e[n++] = gst_element_factory_make("d3d11upload", NULL);
+    e[n++] = gst_element_factory_make("d3d11convert", NULL);
+    e[n++] = caps_filter("video/x-raw(memory:D3D11Memory),format=BGRA");
+    e[n++] = gst_element_factory_make("d3d11download", NULL);
+#else
+    e[n++] = gst_element_factory_make("vapostproc", NULL);
+#endif
+    e[n++] = caps_filter("video/x-raw,format=" GPU_FORMAT);
+    bool usable = true;
+    for (int i = 0; i < n; i++) usable = usable && e[i];
     /* lässt sich die Grafikkarte öffnen? */
-    bool usable = gst_element_set_state(vpp, GST_STATE_READY) != GST_STATE_CHANGE_FAILURE;
-    gst_element_set_state(vpp, GST_STATE_NULL);
-    GstElement *filter = usable ? gst_element_factory_make("capsfilter", NULL) : NULL;
-    if (!filter) {
-        gst_object_unref(vpp);
+    if (usable) {
+        usable = gst_element_set_state(e[GPU_TEST], GST_STATE_READY) != GST_STATE_CHANGE_FAILURE;
+        gst_element_set_state(e[GPU_TEST], GST_STATE_NULL);
+    }
+    if (!usable) {
+        for (int i = 0; i < n; i++)
+            if (e[i]) gst_object_unref(e[i]);
         return sink;
     }
-    GstCaps *caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "BGRx", NULL);
-    g_object_set(filter, "caps", caps, NULL);
-    gst_caps_unref(caps);
     GstElement *bin = gst_bin_new("bild");
-    gst_bin_add_many(GST_BIN(bin), vpp, filter, sink, NULL);
-    gst_element_link_many(vpp, filter, sink, NULL);
-    GstPad *pad = gst_element_get_static_pad(vpp, "sink");
+    for (int i = 0; i < n; i++) gst_bin_add(GST_BIN(bin), e[i]);
+    gst_bin_add(GST_BIN(bin), sink);
+    for (int i = 0; i < n; i++) gst_element_link(e[i], i + 1 < n ? e[i + 1] : sink);
+    GstPad *pad = gst_element_get_static_pad(e[0], "sink");
     gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad));
     gst_object_unref(pad);
-    p->vpp = vpp;
-    p->vpp_filter = filter;
-    md_log("Player: Farbumrechnung in der Grafikkarte (VA-API)");
+    memcpy(p->gpu, e, sizeof e);
+    p->gpu_count = n;
+    md_log("Player: Farbumrechnung in der Grafikkarte (" GPU_NAME ")");
     return bin;
 }
 
-/* Nach einem Fehler: Umrechnung wieder im Prozessor, wie ohne VA-API. playbin steht auf NULL */
+/* Nach einem Fehler: Umrechnung wieder im Prozessor, wie ohne Grafikkarte. playbin steht auf NULL */
 static void drop_gpu_convert(Player *p)
 {
     gpu_convert_failed = true;
@@ -1588,12 +1626,15 @@ static void drop_gpu_convert(Player *p)
     GstPad *ghost = gst_element_get_static_pad(p->sink, "sink");
     GstPad *pad = gst_element_get_static_pad(p->gtk_sink, "sink");
     gst_ghost_pad_set_target(GST_GHOST_PAD(ghost), NULL);
-    gst_element_unlink_many(p->vpp, p->vpp_filter, p->gtk_sink, NULL);
-    gst_bin_remove_many(GST_BIN(p->sink), p->vpp, p->vpp_filter, NULL);
+    for (int i = 0; i < p->gpu_count; i++) {
+        gst_element_unlink(p->gpu[i], i + 1 < p->gpu_count ? p->gpu[i + 1] : p->gtk_sink);
+        gst_bin_remove(GST_BIN(p->sink), p->gpu[i]);
+        p->gpu[i] = NULL;
+    }
+    p->gpu_count = 0;
     gst_ghost_pad_set_target(GST_GHOST_PAD(ghost), pad);
     gst_object_unref(pad);
     gst_object_unref(ghost);
-    p->vpp = p->vpp_filter = NULL;
 }
 
 /* Seite samt Pipeline anlegen; NULL = GStreamer fehlt */
@@ -1713,7 +1754,7 @@ void md_player_set_gpu_convert(bool on)
 bool md_player_gpu_convert_possible(void)
 {
     if (!gst_init_check(NULL, NULL, NULL)) return false;
-    GstElementFactory *factory = gst_element_factory_find("vapostproc");
+    GstElementFactory *factory = gst_element_factory_find(GPU_FACTORY);
     if (factory) gst_object_unref(factory);
     return factory != NULL;
 }

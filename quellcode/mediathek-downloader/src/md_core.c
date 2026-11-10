@@ -5218,6 +5218,12 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
                                           "-hwaccel_output_format", "vaapi", NULL});
         g_free(init);
     }
+#else
+    /* Windows: dekodieren in der Grafikkarte (D3D11VA, DXVA2 oder CUDA, was geht); die Bilder
+     * kommen in den Hauptspeicher zurück, Zuschneiden und Umrechnen bleiben wie bisher. Geht
+     * keiner der Wege, dekodiert ffmpeg im Prozessor. */
+    if (!copy && encoder == MD_ENCODER_GPU)
+        args_add(a, (const char *const[]){"-hwaccel", "auto", NULL});
 #endif
     args_add(a, (const char *const[]){"-i", j->target, NULL});
 
