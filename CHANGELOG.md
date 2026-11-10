@@ -64,6 +64,16 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.7.0 (10.11.2026)
+- Player-Tasten lassen sich unter Einstellungen → „Tasten im Player“ frei belegen.
+- „Intro überspringen“ steht jetzt unten links; → während des Intros springt ans Intro-Ende.
+- Der Reiter „Neue Folgen“ entfällt: Die neuen Folgen stehen jetzt oben in „Meine Videos“.
+- Der Reiter „Warteschlange“ zeigt, ob die Aufträge laufen, angehalten sind oder warten; die
+  ungenaue Restzeit im Kopf der Warteschlange ist weg.
+- Statistik: Knopf „Statistik zurücksetzen“ löscht die erfasste Sehzeit.
+- Neue Einstellung „Reine Audio-Inhalte ausblenden“: Hörfassungen ohne Bildfassung, Podcasts und
+  Radio-Talks.
+
 ### 2.6.2 (10.11.2026)
 - Windows nutzt jetzt auch die Grafikkarte: Der Player rechnet das Bild mit Direct3D 11 um, die
   AV1-Umwandlung dekodiert das Ausgangsvideo in der Grafikkarte.
