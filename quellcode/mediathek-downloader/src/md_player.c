@@ -15,6 +15,11 @@
  * Fenster über allen anderen und spielt dort weiter. Doppelklick oder der Knopf in der Leiste
  * holt sie zurück ins Hauptfenster.
  *
+ * Priorität: Damit das Bild nicht ruckelt, wenn andere Programme den Rechner auslasten, laufen
+ * die Threads von GStreamer (Lesen, Entpacken, Dekodieren) bevorzugt. Unter Linux vergibt das
+ * rtkit über D-Bus (wie bei PipeWire, ohne Administratorrechte), unter Windows steigt die
+ * Priorität des Programms, solange ein Video läuft.
+ *
  * Untertitel: playbin gibt sie an einen appsink statt sie ins Bild zu rechnen; ein Label über
  * dem Bild zeigt sie. So lassen sie sich ohne Umbau der Pipeline umschalten, bleiben beim Zoom
  * lesbar und brauchen kein Pango-Plugin von GStreamer.
@@ -25,6 +30,13 @@
  */
 #include <gst/gst.h>
 #include <string.h>
+#ifdef G_OS_WIN32
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include "md_core.h"
 #include "md_player.h"
 
@@ -56,12 +68,13 @@ static const char *const PLAYER_CSS =
     ".zd-player-osd { padding: 8px 14px; border-radius: 8px; font-weight: bold; }\n"
     ".zd-player-subtitle { color: white; background-color: rgba(0, 0, 0, 0.65);"
     " padding: 4px 12px; border-radius: 6px; }\n"
-    ".zd-player-error { padding: 18px; border-radius: 10px; }\n";
+    ".zd-player-error { padding: 18px; border-radius: 10px; }\n"
+    ".zd-player-skip { padding: 8px 16px; font-weight: bold; }\n";
 
 typedef struct {
     GtkWidget *root, *toplevel, *video, *zoom_box, *revealer, *scale, *time_label, *title_label;
     GtkWidget *play, *next, *audio_button, *text_button, *fullscreen, *volume;
-    GtkWidget *error_box, *error_label, *osd, *subtitle;
+    GtkWidget *error_box, *error_label, *osd, *subtitle, *intro_button;
     GtkWidget *pip_window, *pip_revealer, *pip_play;  /* pip_window: NULL = im Hauptfenster */
     GtkStack *stack;
     GstElement *playbin, *sink;
@@ -81,6 +94,8 @@ typedef struct {
     double zoom;                /* sonst: Vergrößerung gegenüber dem eingepassten Bild */
     bool bars_known, bars_found, bars_busy;
     MdCrop bars;                /* Bereich mit Inhalt, wenn Balken fest im Bild sind */
+    bool intro_known, intro_found, intro_was_in;   /* intro_was_in: letzter Takt im Intro */
+    double intro_start, intro_end;
     bool pointer_known;         /* pointer_x/y: Mausstelle, ab der eine Bewegung zählt */
     double pointer_x, pointer_y;
     guint tick, hide_timer, osd_timer, inhibit;
@@ -90,6 +105,7 @@ typedef struct {
 
 static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
+static bool auto_skip_intro;
 
 static void load_file(Player *p, const char *path, const char *title, double start);
 static void build_track_menu(Player *p, bool text);
@@ -213,8 +229,69 @@ static void update_play_button(Player *p)
 }
 
 /* Bildschirmschoner nur während der Wiedergabe sperren */
+/* Nice-Wert der Player-Threads unter Linux; PipeWire nutzt denselben, rtkit erlaubt bis -15 */
+#define PLAYER_NICE (-11)
+
+/* Den aufrufenden Thread bevorzugen oder wieder normal laufen lassen. Unter Linux erben
+ * Threads, die er startet (etwa die des Dekoders), seinen Wert. */
+static void boost_thread(bool on)
+{
+#ifdef G_OS_WIN32
+    SetThreadPriority(GetCurrentThread(), on ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_NORMAL);
+#else
+    id_t tid = (id_t)syscall(SYS_gettid);
+    /* einen höheren Nice-Wert darf jeder setzen, einen niedrigeren nur mit Rechten oder rtkit */
+    if (!on || setpriority(PRIO_PROCESS, tid, PLAYER_NICE) == 0) {
+        if (!on) setpriority(PRIO_PROCESS, tid, 0);
+        return;
+    }
+    /* Verbindung bleibt offen: GLib hält sie nur schwach, ohne eigene Referenz schließt sie,
+     * bevor rtkit den Absender nachschlagen kann */
+    static GDBusConnection *bus;
+    static gsize once;
+    if (g_once_init_enter(&once)) {
+        bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, NULL);
+        g_once_init_leave(&once, 1);
+    }
+    if (!bus) return;
+    /* ohne Rückruf: der Streaming-Thread wartet nicht auf die Antwort */
+    g_dbus_connection_call(bus, "org.freedesktop.RealtimeKit1", "/org/freedesktop/RealtimeKit1",
+                           "org.freedesktop.RealtimeKit1", "MakeThreadHighPriority",
+                           g_variant_new("(ti)", (guint64)tid, PLAYER_NICE), NULL,
+                           G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL, NULL);
+#endif
+}
+
+/* Läuft im Thread, der die Nachricht schickt: GStreamer meldet so Start und Ende jedes
+ * Streaming-Threads */
+static GstBusSyncReply on_bus_sync(GstBus *bus, GstMessage *message, gpointer data)
+{
+    (void)bus;
+    (void)data;
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_STREAM_STATUS) {
+        GstStreamStatusType type;
+        GstElement *owner = NULL;
+        gst_message_parse_stream_status(message, &type, &owner);
+        if (type == GST_STREAM_STATUS_TYPE_ENTER) boost_thread(true);
+        else if (type == GST_STREAM_STATUS_TYPE_LEAVE) boost_thread(false);
+    }
+    return GST_BUS_PASS;
+}
+
+/* Windows: das ganze Programm bevorzugen, solange ein Video läuft */
+static void boost_process(bool on)
+{
+#ifdef G_OS_WIN32
+    SetPriorityClass(GetCurrentProcess(), on ? ABOVE_NORMAL_PRIORITY_CLASS
+                                             : NORMAL_PRIORITY_CLASS);
+#else
+    (void)on;
+#endif
+}
+
 static void update_inhibit(Player *p)
 {
+    boost_process(p->playing);
     GtkApplication *app = GTK_APPLICATION(g_application_get_default());
     if (!app) return;
     if (p->playing && !p->inhibit)
@@ -463,6 +540,45 @@ static void find_bars(Player *p)
     BarsJob *job = g_new0(BarsJob, 1);
     job->path = g_strdup(p->path);
     g_thread_unref(g_thread_new("balken", bars_thread, job));
+}
+
+typedef struct {
+    char *path;
+    double start, end;
+    bool found;
+} IntroJob;
+
+static gboolean on_intro_done(gpointer data)
+{
+    IntroJob *job = data;
+    Player *p = player;
+    if (p && p->path && !strcmp(p->path, job->path)) {
+        p->intro_known = true;
+        p->intro_found = job->found;
+        p->intro_start = job->start;
+        p->intro_end = job->end;
+    }
+    g_free(job->path);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer intro_thread(gpointer data)
+{
+    IntroJob *job = data;
+    job->found = md_find_intro(job->path, &job->start, &job->end);
+    g_timeout_add_full(G_PRIORITY_DEFAULT, 0, on_intro_done, job, NULL);
+    return NULL;
+}
+
+/* Intro suchen (Ton benachbarter Folgen, beim ersten Mal einige Sekunden) */
+static void find_intro(Player *p)
+{
+    p->intro_known = p->intro_found = p->intro_was_in = false;
+    if (p->intro_button) gtk_widget_hide(p->intro_button);
+    IntroJob *job = g_new0(IntroJob, 1);
+    job->path = g_strdup(p->path);
+    g_thread_unref(g_thread_new("intro", intro_thread, job));
 }
 
 static void set_fill(Player *p, bool fill)
@@ -959,11 +1075,44 @@ static gboolean on_bus(GstBus *bus, GstMessage *message, gpointer data)
     return G_SOURCE_CONTINUE;
 }
 
+static void skip_intro(Player *p)
+{
+    if (!p->intro_found) return;
+    gtk_widget_hide(p->intro_button);
+    seek_to(p, p->intro_end, GST_SEEK_FLAG_ACCURATE);
+}
+
+static void on_intro_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    skip_intro(data);
+}
+
+/* Läuft das Intro: Knopf zeigen oder, wenn eingestellt, gleich überspringen. Wer
+ * zurückspult, ins Intro hinein, sieht es: übersprungen wird nur beim Hineinlaufen */
+static void update_intro(Player *p)
+{
+    if (!p->intro_found || !p->prerolled) return;
+    double pos = current_position(p);
+    bool in = !p->ended && pos >= p->intro_start - 0.2 && pos < p->intro_end - 1.0;
+    bool entered = in && !p->intro_was_in;
+    /* vor dem Start zählt das Hineinlaufen erst, wenn das Video läuft */
+    if (p->playing || !in) p->intro_was_in = in;
+    if (entered && auto_skip_intro && p->playing && p->seek_target < 0) {
+        skip_intro(p);
+        show_osd(p, "Intro übersprungen");
+        p->intro_was_in = false;
+        return;
+    }
+    gtk_widget_set_visible(p->intro_button, in && !p->pip_window);
+}
+
 static gboolean on_tick(gpointer data)
 {
     Player *p = data;
     update_time(p);
     update_subtitle(p);
+    update_intro(p);
     if (p->playing && g_get_monotonic_time() - p->last_report >= REPORT_SECONDS * G_USEC_PER_SEC)
         report(p, false);
     return G_SOURCE_CONTINUE;
@@ -992,6 +1141,7 @@ static void load_file(Player *p, const char *path, const char *title, double sta
     /* Zoom gilt weiter, die Balken gehören zur Datei */
     p->bars_known = p->bars_found = p->bars_busy = false;
     if (p->fill) find_bars(p);
+    find_intro(p);
     gtk_widget_hide(p->error_box);
     gtk_label_set_text(GTK_LABEL(p->title_label), p->title);
     if (p->pip_window) gtk_window_set_title(GTK_WINDOW(p->pip_window), p->title);
@@ -1401,6 +1551,7 @@ static Player *player_new(GtkStack *stack)
     }
     g_object_set(playbin, "video-sink", sink, "volume", last_volume, NULL);
     GstBus *bus = gst_element_get_bus(playbin);
+    gst_bus_set_sync_handler(bus, on_bus_sync, NULL, NULL);
     gst_bus_add_watch(bus, on_bus, p);
     gst_object_unref(bus);
 
@@ -1443,6 +1594,17 @@ static Player *player_new(GtkStack *stack)
     gtk_widget_set_no_show_all(p->subtitle, TRUE);
     p->subtitle_end = -1;
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->subtitle);
+    p->intro_button = gtk_button_new_with_label("Intro überspringen");
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->intro_button), "osd");
+    gtk_style_context_add_class(gtk_widget_get_style_context(p->intro_button), "zd-player-skip");
+    gtk_widget_set_can_focus(p->intro_button, FALSE);
+    gtk_widget_set_halign(p->intro_button, GTK_ALIGN_END);
+    gtk_widget_set_valign(p->intro_button, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(p->intro_button, 24);
+    gtk_widget_set_margin_bottom(p->intro_button, 90);
+    gtk_widget_set_no_show_all(p->intro_button, TRUE);
+    g_signal_connect(p->intro_button, "clicked", G_CALLBACK(on_intro_clicked), p);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), p->intro_button);
     /* Klicks gehen durch den Text hindurch ans Bild */
     gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->subtitle, TRUE);
     gtk_overlay_set_overlay_pass_through(GTK_OVERLAY(overlay), p->osd, TRUE);
@@ -1464,6 +1626,11 @@ static Player *player_new(GtkStack *stack)
 /* ---------------------------------------------------------------------------
  * Schnittstelle
  * ------------------------------------------------------------------------- */
+void md_player_set_auto_skip_intro(bool on)
+{
+    auto_skip_intro = on;
+}
+
 bool md_player_available(char **why)
 {
     GError *err = NULL;

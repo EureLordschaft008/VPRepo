@@ -6,7 +6,7 @@
 #   make install    installiert nach $(PREFIX) (Standard: /usr/local, braucht sudo)
 #   make test       Regressionstests und kurzer Fuzz-Lauf (zusätzlich ASAN=1 für AddressSanitizer)
 
-VERSION  := 2.4.0
+VERSION  := 2.5.1
 DEBREV   := 1
 ARCH     := $(shell dpkg --print-architecture 2>/dev/null || echo amd64)
 PREFIX   ?= /usr/local

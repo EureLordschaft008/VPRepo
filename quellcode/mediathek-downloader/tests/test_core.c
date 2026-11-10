@@ -368,6 +368,96 @@ static void assert_contains(const MdCrop *c, int x, int y, int w, int h)
 
 /* Balken oben/unten und links/rechts werden gefunden, ohne Inhalt abzuschneiden; ein volles
  * Bild und eines, das später voll wird, bleiben ganz */
+/* Titel wie aus MediathekViewWeb, über den echten Parser */
+static MdTitle *episode_title(const char *channel, const char *topic, const char *title)
+{
+    char *json = g_strdup_printf("{\"channel\":\"%s\",\"topic\":\"%s\",\"title\":\"%s\","
+                                 "\"url_video\":\"https://example.org/%u.mp4\","
+                                 "\"duration\":5280}", channel, topic, title,
+                                 g_str_hash(title) ^ g_str_hash(channel));
+    Json j = {json, true};
+    MdTitle *t = json_read_title(&j);
+    g_assert_true(j.ok);
+    g_free(json);
+    return t;
+}
+
+static bool has_title(GPtrArray *titles, const char *title)
+{
+    for (guint i = 0; i < titles->len; i++)
+        if (!strcmp(((MdTitle *)titles->pdata[i])->title, title)) return true;
+    return false;
+}
+
+/* Dieselbe Folge aus mehreren Mediatheken nur einmal; die mit Staffel bleibt */
+/* Intro: gemeinsamer Abschnitt zweier Fingerabdrücke, leicht verrauscht und versetzt */
+static void test_intro_match(void)
+{
+    GRand *rand = g_rand_new_with_seed(7);
+    int na = 4000, nb = 4200, len = 240;    /* 240 Werte ≈ 30 s */
+    guint32 *a = g_new(guint32, na), *b = g_new(guint32, nb);
+    for (int i = 0; i < na; i++) a[i] = g_rand_int(rand);
+    for (int i = 0; i < nb; i++) b[i] = g_rand_int(rand);
+    for (int i = 0; i < len; i++) {
+        guint32 v = g_rand_int(rand);
+        a[1300 + i] = v;
+        b[100 + i] = i % 7 == 3 ? v ^ 0x00010101u : v;  /* hier und da 3 Bits anders */
+    }
+    double start = 0, end = 0;
+    g_assert_true(intro_match(a, na, b, nb, &start, &end));
+    g_assert_cmpfloat(ABS(start - 1300 * INTRO_STEP), <, 0.5);
+    g_assert_cmpfloat(ABS(end - (1300 + len - 1) * INTRO_STEP), <, 0.5);
+    /* zu kurz (10 s) zählt nicht */
+    for (int i = 0; i < nb; i++) b[i] = g_rand_int(rand);
+    for (int i = 0; i < 80; i++) b[500 + i] = a[1300 + i];
+    g_assert_false(intro_match(a, na, b, nb, &start, &end));
+    g_free(a);
+    g_free(b);
+    g_rand_free(rand);
+}
+
+static void test_duplicate_episodes(void)
+{
+    static const struct {
+        const char *channel, *topic, *title;
+        bool kept;
+    } CASES[] = {
+        {"ARD", "Praxis mit Meerblick", "Mutter und Sohn (S01/E13) ()", false},
+        {"ARD", "Praxis mit Meerblick", "Mutter und Sohn · Praxis mit Meerblick (13) (S03/E01)",
+         true},
+        {"ZDF", "Praxis mit Meerblick", "Praxis mit Meerblick – Mutter und Sohn", false},
+        {"3sat", "Fernsehfilm", "Praxis mit Meerblick – Mutter und Sohn", false},
+        {"ARD", "Praxis mit Meerblick", "Der Prozess (S01/E03) ()", true},
+        {"ZDF", "Praxis mit Meerblick", "Praxis mit Meerblick - Der Prozess (S01/E03)", false},
+        /* ohne Gegenstück mit Staffel bleibt alles */
+        {"ARD", "Praxis mit Meerblick", "Alte Freunde (S01/E07) ()", true},
+        {"ARD", "Praxis mit Meerblick", "Praxis mit Meerblick - Auf zu neuen Ufern", true},
+        /* gleicher Name in zwei Staffeln ohne Zählnummer: zwei Folgen */
+        {"ZDF", "Die Bergretter", "Weihnachten (S02/E05)", true},
+        {"ZDF", "Die Bergretter", "Weihnachten (S07/E01)", true},
+        /* zu unspezifisch zum Vergleichen */
+        {"ARD", "Tatort", "Folge 5", true},
+        {"ZDF", "Tatort", "Tatort (S01/E06)", true},
+    };
+    GPtrArray *titles = g_ptr_array_new_with_free_func(md_title_free);
+    for (size_t i = 0; i < G_N_ELEMENTS(CASES); i++)
+        g_ptr_array_add(titles, episode_title(CASES[i].channel, CASES[i].topic, CASES[i].title));
+    drop_duplicate_episodes(titles);
+    for (size_t i = 0; i < G_N_ELEMENTS(CASES); i++) {
+        if (has_title(titles, CASES[i].title) != CASES[i].kept)
+            g_error("%s: erwartet %s", CASES[i].title, CASES[i].kept ? "behalten" : "weg");
+    }
+    g_ptr_array_free(titles, TRUE);
+
+    char *a = episode_name_key("Praxis mit Meerblick",
+                               "Praxis mit Meerblick – S01E13 – Mutter und Sohn");
+    char *b = episode_name_key("Praxis mit Meerblick", "Praxis mit Meerblick - Mutter und Sohn");
+    g_assert_cmpstr(a, ==, b);
+    g_assert_null(episode_name_key("Tatort", "Folge 12"));
+    g_free(a);
+    g_free(b);
+}
+
 static void test_crop_bars(void)
 {
     char *ffmpeg = g_find_program_in_path("ffmpeg");
@@ -509,6 +599,8 @@ int main(int argc, char **argv)
     g_test_add_func("/pfad/kurze-namen", test_path_short_names);
     g_test_add_func("/update/versionen", test_update_versions);
     g_test_add_func("/update/pruefsummen", test_update_sums);
+    g_test_add_func("/suche/doppelte-folgen", test_duplicate_episodes);
+    g_test_add_func("/player/intro-abschnitt", test_intro_match);
     g_test_add_func("/av1/schwarze-balken", test_crop_bars);
 #ifndef G_OS_WIN32
     g_test_add_func("/autostart/eintrag", test_autostart);

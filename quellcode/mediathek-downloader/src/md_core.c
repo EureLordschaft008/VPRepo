@@ -267,6 +267,9 @@ static struct {
     GHashTable *open_keys;          /* Schlüssel offener Aufträge, NULL = neu bestimmen */
     GThread *dispatcher;
     GHashTable *history;            /* Schlüssel -> History* */
+    /* Folgen mit Staffel im Verlauf: "sendung\nname" (episode_name_key) -> Pfad;
+     * NULL = neu bestimmen */
+    GHashTable *history_names;
 } q;
 
 static char *g_app_dir, *g_log_path;
@@ -586,14 +589,20 @@ static void prepare_pipe(int fd)
 #endif
 
 /* Kurzes Werkzeug starten und die Ausgabe einsammeln -> Exit-Code, -1 = nicht startbar */
-static int run_capture(char **argv, char **out, char **err)
+static int run_capture_with(char **argv, char **out, char **err, bool low)
 {
     int status = 0;
-    /* child_setup: endet das Programm, endet auch das Werkzeug */
-    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, child_setup, NULL, out, err, &status,
-                      NULL))
+    /* child_setup: endet das Programm, endet auch das Werkzeug; low = mit niedriger Priorität
+     * wie ein Encoder (nur Linux, Windows setzt das erst nach dem Start) */
+    if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, child_setup,
+                      low ? GINT_TO_POINTER(1) : NULL, out, err, &status, NULL))
         return -1;
     return exit_code(status);
+}
+
+static int run_capture(char **argv, char **out, char **err)
+{
+    return run_capture_with(argv, out, err, false);
 }
 
 /* ---------------------------------------------------------------------------
@@ -840,12 +849,14 @@ static void part_analyse(MdTitle *t, GRegex *part, GRegex *topic_season)
     g_strstrip(series);
     t->episode = atoi(number);
     t->season = 1;
+    t->season_guessed = true;
     g_free(number);
     g_clear_pointer(&match, g_match_info_free);
     if (g_regex_match(topic_season, t->topic, 0, &match)) {
         char *season = g_match_info_fetch(match, 1);
         g_match_info_fetch_pos(match, 0, &start, NULL);
         t->season = atoi(season);
+        t->season_guessed = false;
         t->topic[start] = 0;
         g_free(season);
     }
@@ -936,6 +947,7 @@ static void title_analyse(MdTitle *t)
         g_regex_match(numbered, t->name, 0, &match)) {
         char *first = g_match_info_fetch(match, 1), *second = g_match_info_fetch(match, 2);
         t->season = 1;
+        t->season_guessed = true;
         t->episode = atoi(first && *first ? first : second);
         g_free(first);
         g_free(second);
@@ -1902,6 +1914,156 @@ static char *nrk_stream(const char *manifest, char **error)
     return stream;
 }
 
+static char *title_key(const MdTitle *t);
+
+/* Name einer Folge zum Vergleichen zwischen Mediatheken: klein, ohne Sendungsnamen, ohne
+ * Staffel- und Folgenangaben, nur Buchstaben und Ziffern. "Praxis mit Meerblick – S01E13 –
+ * Mutter und Sohn" und "Praxis mit Meerblick - Mutter und Sohn" ergeben beide
+ * "praxis mit meerblick\nmutterundsohn". NULL = zu wenig übrig, um sicher zu vergleichen. */
+static char *episode_name_key(const char *topic, const char *name)
+{
+    static GRegex *numbers;
+    static gsize once;
+    if (g_once_init_enter(&once)) {
+        numbers = g_regex_new("\\bs\\d+\\s*[e/]\\s*\\d+|\\(s\\d+/e\\d+\\)|\\bfolge\\s*\\d+"
+                              "|\\bstaffel\\s*\\d+|\\(\\d+(/\\d+)?\\)|\\baudiodeskription\\b", G_REGEX_CASELESS, 0, NULL);
+        g_once_init_leave(&once, 1);
+    }
+    char *show = g_utf8_casefold(topic, -1), *text = g_utf8_casefold(name, -1);
+    if (*show) {
+        for (char *at; (at = strstr(text, show));)
+            memmove(at, at + strlen(show), strlen(at + strlen(show)) + 1);
+    }
+    char *plain = g_regex_replace_literal(numbers, text, -1, 0, "", 0, NULL);
+    GString *out = g_string_new(NULL);
+    int letters = 0;
+    for (const char *p = plain; *p; p = g_utf8_next_char(p)) {
+        gunichar c = g_utf8_get_char(p);
+        if (!g_unichar_isalnum(c)) continue;
+        g_string_append_unichar(out, c);
+        letters += !g_unichar_isdigit(c);
+    }
+    char *key = letters >= 4 ? g_strconcat(show, "\n", out->str, NULL) : NULL;
+    g_string_free(out, TRUE);
+    g_free(plain);
+    g_free(text);
+    g_free(show);
+    return key;
+}
+
+/* Wie verlässlich ist die Einordnung einer Folge? 2 = Staffel laut Titel, 1 = nur
+ * angenommen, 0 = keine Staffel */
+static int season_rank(const MdTitle *t)
+{
+    return t->season < 0 ? 0 : t->season_guessed ? 1 : 2;
+}
+
+/* Zählt der Titel beim Abgleich mit anderen Mediatheken? Filme, andere Sprachen und
+ * Gebärdensprache bleiben außen vor. */
+static bool dedup_candidate(const MdTitle *t)
+{
+    return !t->is_film && !t->is_variant && !t->track_label;
+}
+
+/* Dieselbe Folge aus mehreren Mediatheken nur einmal anbieten. Bieten zwei dieselbe Folge
+ * an, bleibt die mit Staffel laut Titel; ohne Staffel oder mit nur angenommener Staffel
+ * ("Folge 13" statt "(S03/E01)") fällt sie weg. Bei gleicher Staffel und Folge bleibt
+ * die erste, bevorzugt die mit verlässlicher Staffel und dem Namen ohne Sendungsnamen. */
+static void drop_duplicate_episodes(GPtrArray *titles)
+{
+    GHashTable *best = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    guint titles_len = titles->len;     /* am Ende sind schon Titel entfernt */
+    char **names = g_new0(char *, titles->len + 1);
+    for (guint i = 0; i < titles->len; i++) {
+        const MdTitle *t = titles->pdata[i];
+        if (!dedup_candidate(t) || !(names[i] = episode_name_key(t->topic, t->name))) continue;
+        int rank = season_rank(t) + 1;
+        int known = GPOINTER_TO_INT(g_hash_table_lookup(best, names[i]));
+        if (rank > known) g_hash_table_replace(best, g_strdup(names[i]), GINT_TO_POINTER(rank));
+    }
+    bool *drop = g_new0(bool, titles->len + 1);
+    /* Folgen, die eine Mediathek als Film führt ("Fernsehfilm": "Praxis mit Meerblick –
+     * Herzklopfen"): fallen weg, wenn die Serie dieselbe Folge mit Staffel anbietet */
+    GHashTable *shows = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < titles->len; i++) {
+        const MdTitle *t = titles->pdata[i];
+        if (names[i] && t->season >= 0)
+            g_hash_table_add(shows, g_utf8_casefold(t->topic, -1));
+    }
+    for (guint i = 0; i < titles->len; i++) {
+        const MdTitle *t = titles->pdata[i];
+        if (!t->is_film || t->is_variant) continue;
+        char *name = g_utf8_casefold(t->name, -1);
+        GHashTableIter iter;
+        gpointer show;
+        g_hash_table_iter_init(&iter, shows);
+        while (!drop[i] && g_hash_table_iter_next(&iter, &show, NULL)) {
+            if (!g_str_has_prefix(name, show)) continue;
+            char *key = episode_name_key(show, t->name);
+            drop[i] = key && g_hash_table_contains(best, key);
+            g_free(key);
+        }
+        g_free(name);
+    }
+    g_hash_table_destroy(shows);
+    for (guint i = 0; i < titles->len; i++)
+        if (names[i])
+            drop[i] = season_rank(titles->pdata[i]) + 1 <
+                      GPOINTER_TO_INT(g_hash_table_lookup(best, names[i]));
+    /* Die ARD zählt manche Serie zusätzlich durch: "Mutter und Sohn (S01/E13)" ist dieselbe
+     * Folge wie "Mutter und Sohn · Praxis mit Meerblick (13) (S03/E01)". Die durchgezählte
+     * Staffel 1 fällt weg, wenn eine andere Staffel ihre Nummer in Klammern nennt. */
+    for (guint i = 0; i < titles->len; i++) {
+        const MdTitle *t = titles->pdata[i];
+        if (drop[i] || !names[i] || t->season != 1 || t->episode < 1) continue;
+        char *count = g_strdup_printf("(%d)", t->episode);
+        for (guint k = 0; k < titles->len && !drop[i]; k++) {
+            const MdTitle *o = titles->pdata[k];
+            if (k == i || drop[k] || !names[k] || o->season <= 1 || season_rank(o) < season_rank(t))
+                continue;
+            drop[i] = !strcmp(names[i], names[k]) && strstr(o->title, count);
+        }
+        g_free(count);
+    }
+    /* gleiche Staffel und Folge: eine behalten */
+    GHashTable *chosen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < titles->len; i++) {
+        const MdTitle *t = titles->pdata[i];
+        if (drop[i] || !dedup_candidate(t) || t->season < 0) continue;
+        char *key = title_key(t);
+        gpointer slot = NULL;
+        if (!g_hash_table_lookup_extended(chosen, key, NULL, &slot)) {
+            g_hash_table_insert(chosen, key, GUINT_TO_POINTER(i + 1));
+            continue;
+        }
+        g_free(key);
+        guint other = GPOINTER_TO_UINT(slot) - 1;
+        const MdTitle *o = titles->pdata[other];
+        char *show = g_utf8_casefold(t->topic, -1);
+        char *a = g_utf8_casefold(t->name, -1), *b = g_utf8_casefold(o->name, -1);
+        bool better = season_rank(t) > season_rank(o) ||
+                      (season_rank(t) == season_rank(o) && strstr(b, show) && !strstr(a, show));
+        g_free(show);
+        g_free(a);
+        g_free(b);
+        if (better) {
+            drop[other] = true;
+            char *k = title_key(t);
+            g_hash_table_replace(chosen, k, GUINT_TO_POINTER(i + 1));
+        } else {
+            drop[i] = true;
+        }
+    }
+    for (guint i = titles->len; i-- > 0;)
+        if (drop[i]) g_ptr_array_remove_index(titles, i);
+    g_hash_table_destroy(chosen);
+    g_hash_table_destroy(best);
+    /* names hat Lücken (NULL), g_strfreev hörte an der ersten auf */
+    for (guint i = 0; i < titles_len; i++) g_free(names[i]);
+    g_free(names);
+    g_free(drop);
+}
+
 /* Beim Stöbern nach Serien: Einzelsendungen ohne Staffelangabe sind keine Serie */
 static void drop_single_shows(GPtrArray *titles)
 {
@@ -1967,6 +2129,7 @@ GPtrArray *md_search(const MdQuery *query, const volatile gint *cancel, bool *tr
     g_hash_table_destroy(seen);
     g_hash_table_destroy(episodes);
     g_ptr_array_free(raw, TRUE);
+    drop_duplicate_episodes(result);
     if (query->kind == MD_KIND_SERIES) drop_single_shows(result);
     return result;
 }
@@ -2114,6 +2277,7 @@ static void history_append_line(GString *out, const History *h)
 /* Verlauf laden; spätere Zeilen ersetzen frühere mit demselben Schlüssel */
 static void history_load(void)
 {
+    g_clear_pointer(&q.history_names, g_hash_table_destroy);
     q.history = g_hash_table_new_full(g_str_hash, g_str_equal, NULL, history_free);
     char *path = history_path(), *text = NULL;
     if (g_file_get_contents(path, &text, NULL, NULL)) {
@@ -2170,11 +2334,13 @@ static void history_add(const Job *j)
     g_free(path);
     g_string_free(line, TRUE);
     g_hash_table_replace(q.history, h->key, h);
+    g_clear_pointer(&q.history_names, g_hash_table_destroy);
 }
 
 /* Verlauf komplett neu schreiben; q.lock wird gehalten */
 static void history_save(void)
 {
+    g_clear_pointer(&q.history_names, g_hash_table_destroy);
     GString *out = g_string_new(NULL);
     GHashTableIter iter;
     gpointer value;
@@ -2506,6 +2672,25 @@ void md_folder_check_apply(const MdFolderCheck *check, bool relink, bool add, bo
     g_mutex_unlock(&q.lock);
 }
 
+/* Pfad einer Folge mit Staffel aus dem Verlauf, die so heißt wie name (episode_name_key);
+ * q.lock wird gehalten */
+static const char *history_name_path(const char *name)
+{
+    if (!q.history_names) {
+        q.history_names = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        GHashTableIter iter;
+        gpointer value;
+        g_hash_table_iter_init(&iter, q.history);
+        while (g_hash_table_iter_next(&iter, NULL, &value)) {
+            const History *h = value;
+            if (h->e.season < 0) continue;
+            char *key = episode_name_key(h->e.topic, h->e.title);
+            if (key) g_hash_table_replace(q.history_names, key, g_strdup(h->e.path));
+        }
+    }
+    return g_hash_table_lookup(q.history_names, name);
+}
+
 MdStatus md_title_status(const MdTitle *t, const char *dir, char **path)
 {
     char *target = md_target_path(t, dir), *key = title_key(t), *known = NULL;
@@ -2526,6 +2711,15 @@ MdStatus md_title_status(const MdTitle *t, const char *dir, char **path)
     if (h) {
         known = g_strdup(h->e.path);
         recorded = true;
+    } else if (!t->is_film && (t->season < 0 || t->season_guessed)) {
+        /* Folge ohne (sichere) Staffel, die es schon mit Staffel gibt: gilt als geladen */
+        char *name = episode_name_key(t->topic, t->name);
+        const char *path = name ? history_name_path(name) : NULL;
+        if (path) {
+            known = g_strdup(path);
+            recorded = true;
+        }
+        g_free(name);
     }
     g_mutex_unlock(&q.lock);
 
@@ -4350,7 +4544,8 @@ static gpointer crop_part_thread(gpointer data)
                     "-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-sn", "-f", "null", "-",
                     NULL};
     char *err = NULL;
-    part->ok = run_capture(argv, NULL, &err) == 0 && err;
+    /* läuft oft neben der Wiedergabe: soll dem Player keine Rechenzeit nehmen */
+    part->ok = run_capture_with(argv, NULL, &err, true) == 0 && err;
     /* mit reset=0 steht der Bereich aller bisherigen Bilder in jeder Zeile, der aller Bilder
      * also in der letzten */
     for (const char *at = err; part->ok && (at = strstr(at, "x1:")); at += 3) part->frames++;
@@ -4447,6 +4642,402 @@ bool md_detect_bars(const char *path, MdCrop *crop)
     bool ok = media_info(path, &codec, &duration) && detect_bars(path, duration, crop);
     g_free(codec);
     return ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * Intros erkennen
+ *
+ * Wie bei Jellyfin: Von den ersten INTRO_SCAN Sekunden einer Folge und zweier Nachbarfolgen
+ * derselben Serie berechnet ffmpeg einen Audio-Fingerabdruck (Chromaprint, ein 32-Bit-Wert
+ * je INTRO_STEP Sekunden). Ein Abschnitt, der in beiden Folgen gleich klingt (je Wert
+ * höchstens INTRO_MAX_BITS abweichende Bits, Lücken bis INTRO_GAP), mindestens INTRO_MIN
+ * und höchstens INTRO_MAX lang, ist das Intro – auch wenn vorher schon eine Szene läuft.
+ * Beide Nachbarn müssen ihn bestätigen: So gilt ein Rückblick auf die Vorwoche, den nur die
+ * vorige Folge enthält, nicht als Intro. Anfang und Ende rücken danach auf den nächsten
+ * Schnitt im Bild, denn der Fingerabdruck endet etwas früher. Ergebnisse stehen in
+ * intros.tsv im Datenordner, je Datei (Pfad, Größe, Änderungszeit).
+ * ------------------------------------------------------------------------- */
+#define INTRO_SCAN 600
+#define INTRO_STEP (4096.0 / 3 / 11025)    /* Abstand der Chromaprint-Werte in Sekunden */
+#define INTRO_MAX_BITS 6
+#define INTRO_GAP 3.5
+#define INTRO_MIN 15.0
+#define INTRO_MAX 180.0
+#define INTRO_SHIFTS 20                     /* so viele Versätze werden genau geprüft */
+#define INTRO_NEIGHBOURS 3
+#define INTRO_FINGERPRINTS 64               /* Fingerabdrücke im Speicher */
+
+static GMutex intro_lock;
+static GHashTable *intro_cache;             /* Schlüssel -> double[2], Anfang < 0 = keins */
+static GHashTable *intro_prints;            /* Schlüssel -> GArray guint32 */
+
+static char *intro_cache_path(void)
+{
+    return g_build_filename(md_app_dir(), "intros.tsv", NULL);
+}
+
+/* intro_lock gehalten */
+static void intro_cache_load(void)
+{
+    if (intro_cache) return;
+    intro_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    char *path = intro_cache_path(), *text = NULL;
+    if (g_file_get_contents(path, &text, NULL, NULL)) {
+        char **lines = g_strsplit(text, "\n", -1);
+        for (int i = 0; lines[i]; i++) {
+            char **f = g_strsplit(lines[i], "\t", -1);
+            if (g_strv_length(f) == 3) {
+                double *range = g_new(double, 2);
+                range[0] = g_ascii_strtod(f[1], NULL);
+                range[1] = g_ascii_strtod(f[2], NULL);
+                g_hash_table_replace(intro_cache, g_strcompress(f[0]), range);
+            }
+            g_strfreev(f);
+        }
+        g_strfreev(lines);
+    }
+    g_free(path);
+    g_free(text);
+}
+
+static void intro_cache_store(const char *key, double start, double end)
+{
+    g_mutex_lock(&intro_lock);
+    intro_cache_load();
+    double *range = g_new(double, 2);
+    range[0] = start;
+    range[1] = end;
+    g_hash_table_replace(intro_cache, g_strdup(key), range);
+    char *escaped = g_strescape(key, NULL), *path = intro_cache_path();
+    char a[G_ASCII_DTOSTR_BUF_SIZE], b[G_ASCII_DTOSTR_BUF_SIZE];
+    char *line = g_strdup_printf("%s\t%s\t%s\n", escaped, g_ascii_formatd(a, sizeof a, "%.2f", start),
+                                 g_ascii_formatd(b, sizeof b, "%.2f", end));
+    FILE *file = g_fopen(path, "a");
+    if (file) {
+        fputs(line, file);
+        fclose(file);
+    }
+    g_free(line);
+    g_free(escaped);
+    g_free(path);
+    g_mutex_unlock(&intro_lock);
+}
+
+/* Audio-Fingerabdruck der ersten INTRO_SCAN Sekunden; NULL = keiner (kein Ton, kein
+ * Chromaprint in ffmpeg) */
+static GArray *intro_fingerprint(const char *path)
+{
+    char *key = crop_cache_key(path);
+    if (!key) return NULL;
+    g_mutex_lock(&intro_lock);
+    if (!intro_prints)
+        intro_prints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                             (GDestroyNotify)g_array_unref);
+    GArray *print = g_hash_table_lookup(intro_prints, key);
+    if (print) g_array_ref(print);
+    g_mutex_unlock(&intro_lock);
+    if (print) {
+        g_free(key);
+        return print;
+    }
+    char *tmp = NULL;
+    int fd = g_file_open_tmp("mediathek-intro-XXXXXX.raw", &tmp, NULL);
+    if (fd < 0) {
+        g_free(key);
+        return NULL;
+    }
+    close(fd);
+    char scan[16];
+    g_snprintf(scan, sizeof scan, "%d", INTRO_SCAN);
+    char *argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-t", scan,
+                    "-i", (char *)path, "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1",
+                    "-f", "chromaprint", "-fp_format", "raw", "-y", tmp, NULL};
+    char *data = NULL;
+    gsize length = 0;
+    /* läuft neben der Wiedergabe: niedrige Priorität */
+    if (run_capture_with(argv, NULL, NULL, true) == 0 &&
+        g_file_get_contents(tmp, &data, &length, NULL) && length >= 4 * 100) {
+        print = g_array_sized_new(FALSE, FALSE, sizeof(guint32), (guint)(length / 4));
+        for (gsize i = 0; i + 4 <= length; i += 4) {
+            const guchar *b = (const guchar *)data + i;
+            guint32 v = b[0] | (guint32)b[1] << 8 | (guint32)b[2] << 16 | (guint32)b[3] << 24;
+            g_array_append_val(print, v);
+        }
+    }
+    g_free(data);
+    g_unlink(tmp);
+    g_free(tmp);
+    if (!print) {
+        g_free(key);
+        return NULL;
+    }
+    g_mutex_lock(&intro_lock);
+    if (g_hash_table_size(intro_prints) >= INTRO_FINGERPRINTS) g_hash_table_remove_all(intro_prints);
+    g_hash_table_replace(intro_prints, key, g_array_ref(print));
+    g_mutex_unlock(&intro_lock);
+    return print;
+}
+
+typedef struct {
+    guint32 value;
+    int pos;
+} PrintEntry;
+
+static int print_entry_cmp(const void *a, const void *b)
+{
+    guint32 x = ((const PrintEntry *)a)->value, y = ((const PrintEntry *)b)->value;
+    return x < y ? -1 : x > y;
+}
+
+/* Gemeinsamer Abschnitt zweier Fingerabdrücke -> Lage in a in Sekunden; false = keiner */
+static bool intro_match(const guint32 *a, int na, const guint32 *b, int nb, double *start,
+                        double *end)
+{
+    if (na < 1 || nb < 1) return false;
+    PrintEntry *sorted = g_new(PrintEntry, nb);
+    for (int j = 0; j < nb; j++) sorted[j] = (PrintEntry){b[j], j};
+    qsort(sorted, (size_t)nb, sizeof *sorted, print_entry_cmp);
+    /* Versatz j - i, verschoben um na */
+    int *counts = g_new0(int, na + nb);
+    for (int i = 0; i < na; i++) {
+        int lo = 0, hi = nb;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (sorted[mid].value < a[i]) lo = mid + 1;
+            else hi = mid;
+        }
+        for (int k = lo; k < nb && sorted[k].value == a[i]; k++) counts[sorted[k].pos - i + na]++;
+    }
+    g_free(sorted);
+    int gap = (int)(INTRO_GAP / INTRO_STEP), min_len = (int)(INTRO_MIN / INTRO_STEP);
+    int max_len = (int)(INTRO_MAX / INTRO_STEP), best_start = -1, best_end = -1;
+    for (int round = 0; round < INTRO_SHIFTS; round++) {
+        int top = 0;
+        for (int k = 1; k < na + nb; k++)
+            if (counts[k] > counts[top]) top = k;
+        if (counts[top] < 5) break;
+        counts[top] = 0;
+        int shift = top - na, run_start = -1, last = -1;
+        for (int i = MAX(0, -shift); i < na && i + shift < nb; i++) {
+            if (__builtin_popcount(a[i] ^ b[i + shift]) > INTRO_MAX_BITS) continue;
+            if (run_start < 0 || i - last > gap) run_start = i;
+            last = i;
+            int len = last - run_start;
+            if (len >= min_len && len <= max_len && len > best_end - best_start) {
+                best_start = run_start;
+                best_end = last;
+            }
+        }
+    }
+    g_free(counts);
+    if (best_start < 0) return false;
+    *start = best_start * INTRO_STEP;
+    *end = best_end * INTRO_STEP;
+    return true;
+}
+
+/* Schnitte im Bild zwischen from und from + length (Sekunden, aufsteigend) */
+static GArray *scene_cuts(const char *path, double from, double length)
+{
+    GArray *cuts = g_array_new(FALSE, FALSE, sizeof(double));
+    char ss[G_ASCII_DTOSTR_BUF_SIZE], t[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_formatd(ss, sizeof ss, "%.2f", MAX(from, 0));
+    g_ascii_formatd(t, sizeof t, "%.2f", length);
+    char *argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-ss", ss, "-t", t, "-i", (char *)path,
+                    "-an", "-sn", "-dn", "-vf", "select='gt(scene,0.25)',showinfo", "-f", "null",
+                    "-", NULL};
+    char *err = NULL;
+    if (run_capture_with(argv, NULL, &err, true) == 0 && err) {
+        for (const char *p = err; (p = strstr(p, "pts_time:")); p++) {
+            double at = g_ascii_strtod(p + 9, NULL) + MAX(from, 0);
+            g_array_append_val(cuts, at);
+        }
+    }
+    g_free(err);
+    return cuts;
+}
+
+/* Anfang und Ende auf den nächsten Schnitt legen */
+static void intro_snap(const char *path, double *start, double *end)
+{
+    GArray *cuts = scene_cuts(path, *end - 0.5, 3.0);
+    for (guint i = 0; i < cuts->len; i++) {
+        double at = g_array_index(cuts, double, i);
+        if (at >= *end - 0.3) {
+            *end = at;
+            break;
+        }
+    }
+    g_array_unref(cuts);
+    if (*start <= 1.0) {
+        *start = 0;
+        return;
+    }
+    cuts = scene_cuts(path, *start - 1.5, 2.0);
+    double best = -1;
+    for (guint i = 0; i < cuts->len; i++) {
+        double at = g_array_index(cuts, double, i);
+        if (best < 0 || ABS(at - *start) < ABS(best - *start)) best = at;
+    }
+    if (best >= 0) *start = best;
+    g_array_unref(cuts);
+}
+
+typedef struct {
+    char *path;
+    int season, episode;
+} IntroNeighbour;
+
+static int neighbour_cmp(gconstpointer a, gconstpointer b, gpointer data)
+{
+    const IntroNeighbour *x = *(IntroNeighbour *const *)a, *y = *(IntroNeighbour *const *)b;
+    const IntroNeighbour *self = data;
+    int dx = abs(x->season - self->season) * 1000 + abs(x->episode - self->episode);
+    int dy = abs(y->season - self->season) * 1000 + abs(y->episode - self->episode);
+    return dx - dy;
+}
+
+static void neighbour_free(gpointer data)
+{
+    IntroNeighbour *n = data;
+    g_free(n->path);
+    g_free(n);
+}
+
+/* Andere Folgen derselben Serie aus dem Verlauf, die nächsten zuerst; NULL = keine Serie */
+static GPtrArray *intro_neighbours(const char *path)
+{
+    g_mutex_lock(&q.lock);
+    const History *self = g_hash_table_find(q.history, history_has_path, (gpointer)path);
+    GPtrArray *list = NULL;
+    IntroNeighbour me = {NULL, 0, 0};
+    if (self && self->e.season >= 0) {
+        me.season = self->e.season;
+        me.episode = self->e.episode;
+        char *topic = g_utf8_casefold(self->e.topic, -1);
+        list = g_ptr_array_new_with_free_func(neighbour_free);
+        GHashTableIter iter;
+        gpointer value;
+        g_hash_table_iter_init(&iter, q.history);
+        while (g_hash_table_iter_next(&iter, NULL, &value)) {
+            const History *h = value;
+            if (h == self || h->e.season < 0 || !strcmp(h->e.path, path)) continue;
+            char *other = g_utf8_casefold(h->e.topic, -1);
+            if (!strcmp(other, topic)) {
+                IntroNeighbour *n = g_new0(IntroNeighbour, 1);
+                n->path = g_strdup(h->e.path);
+                n->season = h->e.season;
+                n->episode = h->e.episode;
+                g_ptr_array_add(list, n);
+            }
+            g_free(other);
+        }
+        g_free(topic);
+    }
+    g_mutex_unlock(&q.lock);
+    if (!list) return NULL;
+    for (guint i = list->len; i-- > 0;)
+        if (file_size(((IntroNeighbour *)list->pdata[i])->path) <= 0)
+            g_ptr_array_remove_index(list, i);
+    g_ptr_array_sort_with_data(list, neighbour_cmp, &me);
+    return list;
+}
+
+typedef struct {
+    const char *path;
+    GArray *print;
+} IntroPrintJob;
+
+static gpointer intro_print_thread(gpointer data)
+{
+    IntroPrintJob *job = data;
+    job->print = intro_fingerprint(job->path);
+    return NULL;
+}
+
+/* Fingerabdrücke mehrerer Dateien gleichzeitig */
+static void intro_prints_parallel(IntroPrintJob *jobs, int count)
+{
+    GThread *threads[INTRO_NEIGHBOURS + 1];
+    for (int i = 0; i < count; i++) threads[i] = g_thread_new("intro", intro_print_thread, &jobs[i]);
+    for (int i = 0; i < count; i++) g_thread_join(threads[i]);
+}
+
+/* Abschnitt mit dem Nachbarn n vergleichen; false = keine Übereinstimmung */
+static bool intro_against(GArray *self, GArray *other, double *start, double *end)
+{
+    return self && other &&
+           intro_match((guint32 *)self->data, (int)self->len, (guint32 *)other->data,
+                       (int)other->len, start, end);
+}
+
+bool md_find_intro(const char *path, double *start, double *end)
+{
+    char *key = crop_cache_key(path);
+    if (!key) return false;
+    g_mutex_lock(&intro_lock);
+    intro_cache_load();
+    const double *cached = g_hash_table_lookup(intro_cache, key);
+    bool known = cached != NULL, found = cached && cached[0] >= 0;
+    if (found) {
+        *start = cached[0];
+        *end = cached[1];
+    }
+    g_mutex_unlock(&intro_lock);
+    if (known) {
+        g_free(key);
+        return found;
+    }
+    GPtrArray *neighbours = intro_neighbours(path);
+    if (!neighbours || !neighbours->len) {
+        /* keine Serie oder keine zweite Folge: nicht merken, später gibt es vielleicht eine */
+        if (neighbours) g_ptr_array_free(neighbours, TRUE);
+        g_free(key);
+        return false;
+    }
+    int count = MIN((int)neighbours->len, INTRO_NEIGHBOURS);
+    IntroPrintJob jobs[INTRO_NEIGHBOURS + 1] = {{path, NULL}};
+    for (int i = 0; i < count; i++) jobs[i + 1].path = ((IntroNeighbour *)neighbours->pdata[i])->path;
+    /* erst die eigene und zwei Nachbarn, den dritten nur bei Bedarf */
+    intro_prints_parallel(jobs, MIN(count, 2) + 1);
+    double s[INTRO_NEIGHBOURS], e[INTRO_NEIGHBOURS];
+    bool hit[INTRO_NEIGHBOURS] = {false};
+    for (int i = 0; i < MIN(count, 2); i++) hit[i] = intro_against(jobs[0].print, jobs[i + 1].print, &s[i], &e[i]);
+    found = false;
+    if (count == 1) {
+        found = hit[0];
+        *start = s[0];
+        *end = e[0];
+    } else if (jobs[0].print) {
+        if (!hit[0] && !hit[1]) {
+            /* kein Intro: merken */
+        } else if (!(hit[0] && hit[1]) && count > 2) {
+            intro_prints_parallel(&jobs[3], 1);
+            hit[2] = intro_against(jobs[0].print, jobs[3].print, &s[2], &e[2]);
+        }
+        /* zwei Bestätigungen, deren Abschnitte sich decken */
+        for (int i = 0; i < count && !found; i++)
+            for (int k = i + 1; k < count && !found; k++) {
+                if (!hit[i] || !hit[k]) continue;
+                *start = MAX(s[i], s[k]);
+                *end = MIN(e[i], e[k]);
+                found = *end - *start >= INTRO_MIN;
+            }
+    }
+    /* ohne eigenen Fingerabdruck (Werkzeug fehlt) nichts merken */
+    bool usable = jobs[0].print != NULL;
+    for (int i = 0; i <= count; i++)
+        if (jobs[i].print) g_array_unref(jobs[i].print);
+    g_ptr_array_free(neighbours, TRUE);
+    if (!usable) {
+        g_free(key);
+        return false;
+    }
+    if (found) intro_snap(path, start, end);
+    intro_cache_store(key, found ? *start : -1, found ? *end : -1);
+    if (found) md_log("Intro erkannt: %s, %.1f–%.1f s", path, *start, *end);
+    g_free(key);
+    return found;
 }
 
 /* Filter gegen die Balken für ffmpeg, NULL = keine */
@@ -5461,13 +6052,18 @@ static Extra *extra_new(bool subtitle, const MdTrack *track)
 
 guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
 {
-    char *target = md_target_path(t, o->dir);
+    char *target = md_target_path(t, o->dir), *key = title_key(t);
     g_mutex_lock(&q.lock);
     for (guint i = 0; i < q.jobs->len; i++) {
         Job *other = q.jobs->pdata[i];
-        if (!strcmp(other->target, target) && other->state != MD_JOB_DONE) {
+        /* dieselbe Folge aus einer anderen Mediathek hat ein anderes Ziel, aber denselben
+         * Schlüssel */
+        bool open = other->state != MD_JOB_DONE;
+        if ((open && !strcmp(other->target, target)) ||
+            (open && other->state != MD_JOB_FAILED && !strcmp(other->key, key))) {
             g_mutex_unlock(&q.lock);
             g_free(target);
+            g_free(key);
             return 0;
         }
     }
@@ -5478,7 +6074,7 @@ guint md_queue_add(const MdTitle *t, const MdJobOptions *o)
                               : g_strdup(t->name);
     j->url = g_strdup(md_title_url(t, o->quality));
     j->target = target;
-    j->key = title_key(t);
+    j->key = key;
     j->topic = g_strdup(t->is_film ? "Filme" : t->topic);
     j->season = t->season;
     j->episode = t->episode;
@@ -5662,6 +6258,43 @@ void md_job_remove(guint id)
         }
         queue_save();
     }
+    g_mutex_unlock(&q.lock);
+}
+
+/* Gehört der Auftrag zur Sendung topic und ist noch nicht fertig? (q.lock gehalten) */
+static bool job_of_topic(const Job *j, const char *topic)
+{
+    if (j->state == MD_JOB_DONE || !j->topic) return false;
+    char *a = g_utf8_casefold(j->topic, -1), *b = g_utf8_casefold(topic, -1);
+    bool same = !strcmp(a, b);
+    g_free(a);
+    g_free(b);
+    return same;
+}
+
+int md_queue_topic_jobs(const char *topic)
+{
+    int n = 0;
+    g_mutex_lock(&q.lock);
+    for (guint i = 0; i < q.jobs->len; i++) n += job_of_topic(q.jobs->pdata[i], topic);
+    g_mutex_unlock(&q.lock);
+    return n;
+}
+
+void md_queue_remove_topic(const char *topic)
+{
+    g_mutex_lock(&q.lock);
+    for (guint i = q.jobs->len; i-- > 0;) {
+        Job *j = q.jobs->pdata[i];
+        if (!job_of_topic(j, topic)) continue;
+        j->remove_requested = true;
+        if (!j->worker) {
+            remove_partial_files(j);
+            job_discard(j);
+        }
+    }
+    queue_save();
+    g_cond_broadcast(&q.wake);
     g_mutex_unlock(&q.lock);
 }
 

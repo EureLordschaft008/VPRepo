@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.4.0"
+#define MD_VERSION "2.5.1"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -51,6 +51,7 @@ typedef struct {
     int season, episode;        /* -1 = keine Angabe */
     int source;                 /* MD_SOURCE_* */
     bool is_film, is_variant;   /* variant: Gebärdensprache (eigenes Bild) */
+    bool season_guessed;        /* Staffel nur angenommen ("Folge 13" gilt als Staffel 1) */
     const char *track_label, *track_lang;   /* Sprache laut Titel, NULL = Hauptfassung */
     GPtrArray *audio;           /* MdTrack*; [0] = Ton der Datei, aus der das Bild kommt */
     GPtrArray *subtitles;       /* MdTrack* */
@@ -160,6 +161,10 @@ typedef struct {
     int x, y, width, height, frame_width, frame_height;
 } MdCrop;
 bool md_detect_bars(const char *path, MdCrop *crop);   /* dauert einige Sekunden */
+/* Intro einer Serienfolge über den Ton benachbarter Folgen finden: Anfang und Ende in Sekunden.
+ * Beim ersten Mal dauert es einige Sekunden, danach steht es in intros.tsv. false = keins
+ * (oder keine zweite Folge der Serie da) */
+bool md_find_intro(const char *path, double *start, double *end);
 
 /* Start mit der Anmeldung (Linux: ~/.config/autostart, Windows: Registry „Run“) */
 bool md_autostart_enabled(void);
@@ -208,6 +213,10 @@ void md_queue_hold(bool downloads, bool conversions);
 void md_queue_holds(bool *downloads, bool *conversions);
 void md_job_retry(guint id);
 void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dateien */
+/* Offene und fehlgeschlagene Aufträge der Sendung topic (Groß-/Kleinschreibung egal): zählen
+ * bzw. abbrechen und samt halbfertiger Dateien löschen. Laufende enden kurz darauf. */
+int md_queue_topic_jobs(const char *topic);
+void md_queue_remove_topic(const char *topic);
 void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
 void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
 gint64 md_job_partial_bytes(guint id);  /* Größe der halbfertigen Dateien eines Auftrags */

@@ -93,6 +93,9 @@ cp LICENSE "$APP/LICENSE.txt"
 "$APP/bin/mediathek-downloader-cli.exe" --help > /dev/null
 "$APP/bin/curl.exe" --version > /dev/null
 "$APP/bin/ffmpeg.exe" -hide_banner -version > /dev/null
+# Intro-Erkennung braucht Chromaprint in ffmpeg; fehlt es, gibt es keinen Knopf (Warnung im Log)
+"$APP/bin/ffmpeg.exe" -hide_banner -muxers 2> /dev/null | grep -q chromaprint ||
+    echo "::warning::ffmpeg ohne Chromaprint – Intros werden unter Windows nicht erkannt"
 makensis -V2 -DVERSION="$VERSION" -DSRC="$(cygpath -aw "$APP")" \
     -DICON="$(cygpath -aw "$WORK/mediathek-downloader.ico")" \
     -DLICENSE="$(cygpath -aw LICENSE)" \

@@ -276,6 +276,7 @@ typedef struct {
     bool update_check;          /* beim Start nach Updates suchen */
     char *update_skip;          /* diese Version nicht mehr anbieten */
     bool auto_news;             /* neue Folgen geladener Serien von selbst laden */
+    bool skip_intro;            /* erkannte Intros im Player von selbst überspringen */
     bool hold_downloads, hold_conversions;  /* alle Downloads bzw. Umwandlungen angehalten */
 } Config;
 
@@ -872,6 +873,8 @@ static void settings_load(void)
     c->maximized = settings_bool(file, "Maximiert", false);
     c->update_check = settings_bool(file, "UpdateSuchen", true);
     c->auto_news = settings_bool(file, "NeueFolgenLaden", false);
+    c->skip_intro = settings_bool(file, "IntroUeberspringen", false);
+    md_player_set_auto_skip_intro(c->skip_intro);
     c->hold_downloads = settings_bool(file, "DownloadsAngehalten", false);
     c->hold_conversions = settings_bool(file, "UmwandlungAngehalten", false);
     c->update_skip = g_key_file_get_string(file, SETTINGS_GROUP, "UpdateUebersprungen", NULL);
@@ -902,6 +905,7 @@ static void settings_save(void)
     g_key_file_set_boolean(file, SETTINGS_GROUP, "Maximiert", c->maximized);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UpdateSuchen", c->update_check);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "NeueFolgenLaden", c->auto_news);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "IntroUeberspringen", c->skip_intro);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "DownloadsAngehalten", c->hold_downloads);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UmwandlungAngehalten", c->hold_conversions);
     if (c->update_skip)
@@ -4356,17 +4360,21 @@ static void remove_empty_folders(const char *path)
 }
 
 /* Dateien nach Rückfrage in den Papierkorb; der Verlauf bleibt, damit die Suche nach neuen
- * Folgen sie nicht wieder als neu meldet */
+ * Folgen sie nicht wieder als neu meldet. Bei einer ganzen Serie (topic gesetzt) verschwinden
+ * auch ihre geplanten Downloads und Umwandlungen aus der Warteschlange. */
 static void on_menu_trash(GtkMenuItem *item, gpointer d)
 {
     (void)d;
     char **paths = g_object_get_data(G_OBJECT(item), "paths");
     const char *title = g_object_get_data(G_OBJECT(item), "title");
+    const char *topic = g_object_get_data(G_OBJECT(item), "topic");
     const char *playing = md_player_current();
+    int jobs = topic ? md_queue_topic_jobs(topic) : 0;
     int count = 0;
     gint64 bytes = 0;
     for (char **path = paths; *path; path++) {
-        if (!g_strcmp0(*path, playing) || md_file_in_use(*path)) {
+        /* Aufträge der Serie werden gleich abgebrochen, ihre Dateien sind dann frei */
+        if (!g_strcmp0(*path, playing) || (!jobs && md_file_in_use(*path))) {
             show_info_bar(GTK_MESSAGE_WARNING, "Eine der Dateien läuft gerade im Player oder "
                           "wird noch bearbeitet. Bitte erst schließen bzw. warten.");
             return;
@@ -4378,13 +4386,30 @@ static void on_menu_trash(GtkMenuItem *item, gpointer d)
     char *size = md_format_size((double)bytes);
     char *question = count == 1 ? g_strdup_printf("„%s“ löschen?", title)
                                 : g_strdup_printf("%d Folgen von „%s“ löschen?", count, title);
+    char *queued = jobs ? g_strdup_printf(" %d %s der Serie in der Warteschlange %s "
+                                          "abgebrochen und entfernt.", jobs,
+                                          plural(jobs, "Auftrag", "Aufträge"),
+                                          jobs == 1 ? "wird" : "werden")
+                        : g_strdup("");
     char *text = g_strdup_printf("%s werden in den Papierkorb verschoben und lassen sich dort "
-                                 "wiederherstellen.", size);
+                                 "wiederherstellen.%s", size, queued);
+    g_free(queued);
     bool yes = ask_confirmation(question, text, "Abbrechen", "In den Papierkorb", true);
     g_free(size);
     g_free(question);
     g_free(text);
     if (!yes) return;
+    if (topic) {
+        md_queue_remove_topic(topic);
+        /* laufende Umwandlungen geben ihre Dateien erst frei, wenn ffmpeg beendet ist */
+        for (int wait = 0; wait < 100; wait++) {
+            bool busy = false;
+            for (char **path = paths; *path && !busy; path++) busy = md_file_in_use(*path);
+            if (!busy) break;
+            g_usleep(100 * 1000);
+        }
+        on_tick(NULL);
+    }
     int failed = 0;
     char *reason = NULL;
     for (char **path = paths; *path; path++) {
@@ -4498,6 +4523,7 @@ static gboolean on_tile_press(GtkWidget *w, GdkEventButton *e, gpointer d)
     char *name = entry ? (entry->is_film ? g_strdup(entry->title) : episode_label(entry))
                        : g_strdup(show->name);
     g_object_set_data_full(G_OBJECT(trash), "title", name, g_free);
+    if (!single) g_object_set_data_full(G_OBJECT(trash), "topic", g_strdup(show->name), g_free);
     gtk_widget_show_all(menu);
     g_signal_connect(menu, "deactivate", G_CALLBACK(on_menu_deactivate), NULL);
     gtk_menu_popup_at_pointer(GTK_MENU(menu), (GdkEvent *)e);
@@ -6106,7 +6132,7 @@ static void on_data_reset_clicked(GtkButton *b, gpointer d)
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
 static GtkWidget *quality_combo, *encoder_combo, *gpu_spin, *cpu_spin, *parallel_spin;
 static GtkWidget *convert_spin, *av1_switch, *keep_switch, *signed_switch, *min_spin;
-static GtkWidget *update_switch, *news_switch;
+static GtkWidget *update_switch, *news_switch, *intro_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
@@ -6134,6 +6160,8 @@ static void on_setting_changed(GtkWidget *w, gpointer d)
     c->keep_original = gtk_switch_get_active(GTK_SWITCH(keep_switch));
     c->show_signed = gtk_switch_get_active(GTK_SWITCH(signed_switch));
     c->update_check = gtk_switch_get_active(GTK_SWITCH(update_switch));
+    c->skip_intro = gtk_switch_get_active(GTK_SWITCH(intro_switch));
+    md_player_set_auto_skip_intro(c->skip_intro);
     bool auto_news = c->auto_news;
     c->auto_news = gtk_switch_get_active(GTK_SWITCH(news_switch));
     if (c->auto_news && !auto_news) start_news_load();      /* gleich nachsehen */
@@ -6255,6 +6283,13 @@ static GtkWidget *build_settings_page(void)
     add_row(search, "Fassungen mit Gebärdensprache anzeigen",
             "Die Einblendung ist fest im Bild, darum sind das eigene Einträge.", NULL,
             signed_switch, NULL);
+
+    GtkWidget *player_group = add_group(page, "Player");
+    intro_switch = new_setting_switch(c->skip_intro);
+    add_row(player_group, "Intros automatisch überspringen",
+            "Der Vorspann einer Serie wird am Ton erkannt, den mehrere Folgen gemeinsam haben. "
+            "Ausgeschaltet erscheint während des Intros der Knopf „Intro überspringen“.", NULL,
+            intro_switch, NULL);
 
     GtkWidget *start = add_group(page, "Automatisch");
     GtkWidget *autostart = gtk_switch_new();

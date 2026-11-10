@@ -39,6 +39,8 @@ bool md_player_play(GtkStack *stack, const char *path, const char *title, double
 bool md_player_pip(void);
 /* Player schließen und die Seite entfernen; ruft vorher hooks.closed */
 void md_player_close(void);
+/* Erkannte Intros von selbst überspringen statt nur den Knopf zu zeigen */
+void md_player_set_auto_skip_intro(bool on);
 /* Tasten des Players, je Zeile "Taste\tWirkung" */
 const char *md_player_keys_text(void);
 

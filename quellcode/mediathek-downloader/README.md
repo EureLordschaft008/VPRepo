@@ -81,7 +81,11 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Häkchen. Eine Serie oder Staffel wählt nur aus, was noch fehlt. Die Folgen kommen aus allen
   Mediatheken: Bietet die eine nur einen Teil einer Staffel, kommen die übrigen von einer anderen,
   auch wenn diese in der Vorschau gerade nicht ausgewählt ist. Eine schon geladene Folge lässt
-  sich nicht aus Versehen doppelt laden. Ein ⚠ an der Staffel warnt, wenn Folgen in der Nummerierung
+  sich nicht aus Versehen doppelt laden. Bieten mehrere Mediatheken dieselbe Folge an, erscheint sie
+  nur einmal, und zwar die mit Staffelangabe: Fassungen ohne Staffel (auch als „Fernsehfilm“
+  geführte) fallen weg, ebenso die ARD-Zählung, die alle Folgen in Staffel 1 durchnummeriert
+  („Mutter und Sohn (S01/E13)“ neben „… (13) (S03/E01)“). Ist eine Folge schon mit Staffel geladen,
+  gilt dieselbe Folge ohne Staffel als geladen. Ein ⚠ an der Staffel warnt, wenn Folgen in der Nummerierung
   fehlen. Fehlt nur das Ende einer Staffel, ist das nicht zu erkennen.
 - **Was ist schon da?** – Jede Folge trägt ihren Stand: *Geladen*, *In Warteschlange*, *Angefangen*
   oder *Datei fehlt*. Serien und Staffeln zeigen „2 von 265 geladen“. Der Filter oben blendet alles
@@ -105,6 +109,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   markiert als gesehen oder ungesehen, öffnet Ordner oder ein anderes Programm, wandelt nachträglich
   nach AV1 um (eine Datei oder alle Folgen; was schon AV1 ist, bleibt) und verschiebt Filme,
   Folgen oder ganze Serien nach Rückfrage in den Papierkorb; leere Staffelordner verschwinden mit.
+  Beim Löschen einer ganzen Serie verschwinden auch ihre geplanten Downloads und Umwandlungen aus
+  der Warteschlange; die Rückfrage nennt, wie viele es sind.
   Der Verlauf behält sie, damit die Suche nach neuen Folgen sie nicht wieder meldet. An „Weiterschauen“
   fehlt „Mit anderem Programm öffnen“. Nach der Suche nach neuen Folgen trägt eine Serie
   „✓ Komplett“, wenn jede Staffel ohne Lücke bis zur letzten angebotenen Folge da ist; komplette
@@ -120,7 +126,10 @@ das Update unter Linux auch über `sudo apt upgrade`.
   der Festplatte, wie viel davon schon gesehen ist, und die größten Dateien. Sehzeit zählt nur im
   eingebauten Player und nur, was wirklich lief; sie liegt in `sehzeit.tsv` im Datenordner und
   bleibt, auch wenn die Datei gelöscht wird.
-- **Player** – spielt die Dateien im Hauptfenster, auch AV1; im Vollbild verschwindet die
+- **Player** – spielt die Dateien im Hauptfenster, auch AV1, und läuft bevorzugt, damit nichts
+  ruckelt, wenn andere Programme den Rechner auslasten (Linux: über rtkit wie PipeWire, ohne
+  Administratorrechte; Windows: höhere Priorität, solange ein Video läuft). Die Suche nach
+  schwarzen Balken läuft dagegen mit niedriger Priorität. Im Vollbild verschwindet die
   Titelleiste. Er merkt sich, wo eine Datei aufgehört hat, macht dort weiter und startet am Ende die
   nächste Folge. Tonspur und Untertitel lassen sich während der Wiedergabe wechseln bzw. an- und
   ausschalten. Der Zoom blendet schwarze Balken aus: „Schwarze Balken ausblenden“ sucht per ffmpeg
@@ -139,6 +148,18 @@ das Update unter Linux auch über `sudo apt upgrade`.
   einem kleinen Fenster über allen anderen weiter (Bild im Bild); Doppelklick oder der Knopf in
   dessen Leiste holt es zurück. Ab 95 % gilt eine Datei als gesehen. Der Stand liegt in
   `wiedergabe.tsv` im Datenordner.
+  **Intros:** Läuft der Vorspann einer Serienfolge, erscheint unten rechts der Knopf „Intro
+  überspringen“. Mit „Intros automatisch überspringen“ (Einstellungen → Player) springt der Player
+  von selbst ans Ende und zeigt kurz „Intro übersprungen“; wer danach zurück ins Intro spult, sieht
+  es. Erkannt wird das Intro wie bei Jellyfin am Ton: ffmpeg berechnet für die ersten zehn Minuten
+  der Folge und zweier Nachbarfolgen derselben Serie einen Audio-Fingerabdruck (Chromaprint), und
+  ein Abschnitt von 15 Sekunden bis drei Minuten, der in beiden Nachbarn gleich klingt, gilt als
+  Intro – auch nach einer Szene vor dem Vorspann. Anfang und Ende rücken auf den nächsten Schnitt
+  im Bild. Das dauert beim ersten Abspielen einer Folge etwa 10 bis 20 Sekunden mit niedriger
+  Priorität; das Ergebnis steht danach in `intros.tsv` im Datenordner. Voraussetzungen: Die Folge
+  hat eine Staffel- und Folgennummer, von der Serie ist mindestens eine weitere Folge geladen, und
+  ffmpeg kann Chromaprint (sonst erscheint kein Knopf). Ganz kurze Titelkarten (unter 15 Sekunden)
+  gelten nicht als Intro.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.
