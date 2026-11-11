@@ -64,6 +64,12 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.7.1 (12.11.2026)
+- Meldungen oben verschwinden nach 10 Sekunden von selbst.
+- Fertige Aufträge verschwinden automatisch aus der Warteschlange; der Knopf „Fertige entfernen“
+  entfällt.
+- Der Kopf der Warteschlange zeigt, wie viele Aufträge noch auf die Umwandlung warten.
+
 ### 2.7.0 (10.11.2026)
 - Player-Tasten lassen sich unter Einstellungen → „Tasten im Player“ frei belegen.
 - „Intro überspringen“ steht jetzt unten links; → während des Intros springt ans Intro-Ende.
