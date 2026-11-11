@@ -50,6 +50,7 @@
 #define TICK_IDLE 10            /* ohne Arbeit: nur jeder so vielte Takt sieht nach */
 #define TICK_HIDDEN 4            /* Fenster verborgen, Aufträge laufen */
 #define INFO_LINES_MAX 3        /* so viele Meldungen zeigt die Leiste übereinander */
+#define INFO_SECONDS 10         /* so lange bleibt die Meldungsleiste stehen */
 #define JOB_ROWS_BATCH 100      /* Zeilen der Downloadliste auf einmal (weitere per Knopf) */
 #define PREVIEW_TILES_BATCH 30  /* Kacheln je Abschnitt auf einmal (weitere per Knopf) */
 #define PREVIEW_FILM_MIN_MINUTES 40
@@ -347,6 +348,8 @@ typedef struct {
     GtkWidget *clear_failed;
     GtkWidget *hold_downloads, *hold_conversions;   /* Schalter: angehalten */
     int jobs_limit;             /* so viele Zeilen zeigt die Liste */
+    int jobs_finished;          /* seit dem Start fertig gewordene (verschwinden aus der Liste) */
+    guint info_timer;           /* blendet die Meldungsleiste aus */
     GtkWidget *limit_switch, *limit_spin;
     GHashTable *job_rows;       /* id -> JobRow* */
     GHashTable *job_marks;      /* Nummer -> JobMark: Stand beim letzten Timer-Schlag */
@@ -628,13 +631,25 @@ static bool ask_confirmation(const char *title, const char *text, const char *no
     return r;
 }
 
-/* Meldungsleiste oben im Fenster (NULL schließt sie) */
+static gboolean on_info_timeout(gpointer d)
+{
+    (void)d;
+    ui.info_timer = 0;
+    gtk_info_bar_set_revealed(GTK_INFO_BAR(ui.infobar), FALSE);
+    return G_SOURCE_REMOVE;
+}
+
+/* Meldungsleiste oben im Fenster (NULL schließt sie); sie geht nach INFO_SECONDS von selbst
+ * zu, jede neue Meldung startet die Zeit neu */
 static void show_info_bar(GtkMessageType type, const char *text)
 {
+    if (ui.info_timer) g_source_remove(ui.info_timer);
+    ui.info_timer = 0;
     if (!text) {
         gtk_info_bar_set_revealed(GTK_INFO_BAR(ui.infobar), FALSE);
         return;
     }
+    ui.info_timer = g_timeout_add_seconds(INFO_SECONDS, on_info_timeout, NULL);
     /* steht schon eine Meldung da, bleibt sie unter der neuen stehen (höchstens INFO_LINES_MAX);
      * die Farbe richtet sich nach der ernstesten */
     static GPtrArray *lines;
@@ -3749,12 +3764,13 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
         sync_hold_switches(hold_downloads, hold_conversions);
         settings_save();
     }
-    int active = 0, open = 0, paused = 0, failed = 0, done = 0;
+    int active = 0, open = 0, paused = 0, failed = 0, to_convert = 0, done = ui.jobs_finished;
     double speed = 0;
     for (int i = 0; i < count; i++) {
         const MdJobView *j = &jobs[i];
         done += j->state == MD_JOB_DONE;
         failed += j->state == MD_JOB_FAILED;
+        to_convert += j->state == MD_JOB_CONVERT_WAITING;
         if (j->state == MD_JOB_DONE || j->state == MD_JOB_FAILED) continue;
         open++;
         if (j->paused) paused++;
@@ -3768,7 +3784,7 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
         title = g_strdup_printf("%d %s aktiv", active, plural(active, "Auftrag", "Aufträge"));
     else if (paused) title = g_strdup_printf("%d pausiert", paused);
     else if (open) title = g_strdup_printf("%d %s", open, plural(open, "wartet", "warten"));
-    else title = g_strdup(count ? "Alles erledigt" : "Keine Downloads");
+    else title = g_strdup(count || done ? "Alles erledigt" : "Keine Downloads");
     set_label_text(ui.hero, title);
     g_free(title);
 
@@ -3780,6 +3796,8 @@ static void update_downloads_hero(const MdJobView *jobs, int count)
         g_free(text);
     }
     g_string_append_printf(sub, "%d offen · %d fertig", open, done);
+    if (to_convert) g_string_append_printf(sub, " · %d %s auf Umwandlung", to_convert,
+                                           plural(to_convert, "wartet", "warten"));
     if (failed) g_string_append_printf(sub, " · %d fehlgeschlagen", failed);
     if (hold_downloads) g_string_append(sub, " · Downloads angehalten");
     if (hold_conversions) g_string_append(sub, " · Umwandlung angehalten");
@@ -3914,6 +3932,10 @@ static gboolean on_tick(gpointer d)
     }
     last_serial = serial;
     skipped = 0;
+    /* Fertiges verschwindet von selbst aus der Liste; gezählt wird es für den Kopf weiter */
+    int finished = md_queue_remove_finished();
+    ui.jobs_finished += finished;
+    if (finished) last_serial = md_queue_serial();
     int count = 0;
     MdJobView *jobs = md_queue_snapshot(&count);
     bool groups_changed = update_job_groups(jobs, count);
@@ -3985,13 +4007,6 @@ static void on_hold_changed(GObject *w, GParamSpec *spec, gpointer d)
     on_tick(NULL);
 }
 
-static void on_clear_done_clicked(GtkButton *b, gpointer d)
-{
-    (void)b;
-    (void)d;
-    md_queue_remove_finished();
-}
-
 static void on_clear_failed_clicked(GtkButton *b, gpointer d)
 {
     (void)b;
@@ -4044,15 +4059,12 @@ static GtkWidget *build_downloads_page(void)
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_set_margin_top(buttons, 10);
     ui.run_all = gtk_toggle_button_new_with_label("Alle fortsetzen");
-    GtkWidget *clear = gtk_button_new_with_label("Fertige entfernen");
     ui.clear_failed = gtk_button_new_with_label("Fehlgeschlagene entfernen");
     gtk_widget_set_tooltip_text(ui.clear_failed,
                                 "Löscht nach Rückfrage auch die halbfertigen Dateien");
     g_signal_connect(ui.run_all, "toggled", G_CALLBACK(on_run_all_toggled), NULL);
-    g_signal_connect(clear, "clicked", G_CALLBACK(on_clear_done_clicked), NULL);
     g_signal_connect(ui.clear_failed, "clicked", G_CALLBACK(on_clear_failed_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(buttons), ui.run_all, FALSE, FALSE, 0);
-    gtk_box_pack_end(GTK_BOX(buttons), clear, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(buttons), ui.clear_failed, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(page), buttons, FALSE, FALSE, 0);
 
@@ -6804,8 +6816,9 @@ static gboolean on_quit_request(gpointer d)
 static void on_info_bar_response(GtkInfoBar *info_bar, gint response, gpointer d)
 {
     (void)response;
+    (void)info_bar;
     (void)d;
-    gtk_info_bar_set_revealed(info_bar, FALSE);
+    show_info_bar(GTK_MESSAGE_INFO, NULL);
 }
 
 /* --- Updates ------------------------------------------------------------- */

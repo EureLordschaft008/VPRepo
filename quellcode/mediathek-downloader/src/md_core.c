@@ -6541,15 +6541,20 @@ void md_queue_pause_topic(const char *topic, bool paused)
     g_mutex_unlock(&q.lock);
 }
 
-void md_queue_remove_finished(void)
+int md_queue_remove_finished(void)
 {
+    int removed = 0;
     g_mutex_lock(&q.lock);
     for (guint i = q.jobs->len; i-- > 0;) {
         Job *j = q.jobs->pdata[i];
-        if (j->state == MD_JOB_DONE && !j->worker) job_discard(j);
+        if (j->state == MD_JOB_DONE && !j->worker) {
+            job_discard(j);
+            removed++;
+        }
     }
-    queue_save();
+    if (removed) queue_save();
     g_mutex_unlock(&q.lock);
+    return removed;
 }
 
 gint64 md_job_partial_bytes(guint id)

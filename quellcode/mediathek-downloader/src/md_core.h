@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.7.0"
+#define MD_VERSION "2.7.1"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -223,7 +223,7 @@ void md_job_remove(guint id);           /* bricht ab und löscht halbfertige Dat
 int md_queue_topic_jobs(const char *topic);
 void md_queue_remove_topic(const char *topic);
 void md_queue_pause_topic(const char *topic, bool paused);  /* offene Aufträge der Sendung */
-void md_queue_remove_finished(void);    /* fertige Einträge aus der Liste nehmen */
+int md_queue_remove_finished(void);     /* fertige Einträge aus der Liste nehmen -> wie viele */
 void md_queue_remove_failed(void);      /* fehlgeschlagene samt halbfertiger Dateien löschen */
 gint64 md_job_partial_bytes(guint id);  /* Größe der halbfertigen Dateien eines Auftrags */
 gint64 md_queue_failed_bytes(int *count); /* dasselbe für alle Fehlschläge, count = Anzahl */

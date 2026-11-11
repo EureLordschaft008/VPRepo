@@ -175,6 +175,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.
+- **Meldungen** – die farbige Leiste oben (etwa „2 neue Folgen automatisch in die Warteschlange
+  gestellt“) geht nach 10 Sekunden von selbst zu; das × schließt sie sofort.
 - **Tastenkürzel** – Strg+1 bis Strg+5 wählen die Reiter, Strg+Bild↑/↓ blättert durch sie, Strg+F
   springt ins Suchfeld, F5 lädt die aktuelle Seite neu, F1 zeigt alle Kürzel. „Erste Schritte“ im
   Menü erklärt den Ablauf in wenigen Sätzen.
@@ -186,10 +188,11 @@ das Update unter Linux auch über `sudo apt upgrade`.
   Stelle weiter; offene Downloads warten beim nächsten Start pausiert auf einen Klick. Downloads und
   Umwandlung lassen sich außerdem getrennt anhalten (Seite Warteschlange, „Steuerung“): Dann laden etwa
   die Downloads weiter, während die Umwandlung stillsteht.
-- **Warteschlange** – oben steht, was gerade läuft, dann Fehlgeschlagenes, Wartendes und zuletzt
-  Fertiges. Die Liste zeigt 100 Aufträge, „Weitere anzeigen“ holt die nächsten; so bleibt sie auch
-  mit Tausenden Einträgen flüssig. „Fertige entfernen“ räumt Erledigtes weg, „Fehlgeschlagene
-  entfernen“ alle Fehlschläge samt ihrer halbfertigen Dateien. Liegen dabei Reste auf der Platte,
+- **Warteschlange** – oben steht, was gerade läuft, dann Fehlgeschlagenes und Wartendes. Fertige
+  Aufträge verschwinden von selbst aus der Liste; der Kopf zählt, wie viele seit dem Start fertig
+  wurden („56 fertig“), und wie viele noch auf die Umwandlung warten („3 warten auf Umwandlung“). Die Liste zeigt 100 Aufträge, „Weitere anzeigen“ holt die nächsten; so bleibt sie
+  auch mit Tausenden Einträgen flüssig. „Fehlgeschlagene entfernen“ räumt alle Fehlschläge samt
+  ihrer halbfertigen Dateien weg. Liegen dabei Reste auf der Platte,
   fragt das Programm vorher nach und nennt ihre Größe, auch beim Entfernen eines einzelnen
   Fehlschlags. Fehlermeldungen sagen, ob „Erneut versuchen“ hilft oder was sonst zu tun ist.
   Hat eine Serie mindestens drei offene Aufträge, stehen sie unter einer Zeile mit dem Seriennamen,
