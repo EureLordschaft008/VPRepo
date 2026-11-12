@@ -64,6 +64,14 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.8.0 (12.11.2026)
+- Abspann überspringen: Der Player erkennt den Abspann am Ton benachbarter Folgen; der Knopf
+  „Abspann überspringen“ (auch → und I) führt zur nächsten Folge.
+- Rückblicke überspringen: „Was bisher geschah“ wird an Ton oder Bild aus den vorigen Folgen
+  erkannt; Knopf „Rückblick überspringen“ (folgt das Intro direkt, auch darüber) und neue
+  Einstellung „Rückblicke automatisch überspringen“. Die vorige Folge muss geladen sein; beim ersten
+  Mal dauert die Erkennung je Folge einige Minuten im Hintergrund.
+
 ### 2.7.1 (12.11.2026)
 - Meldungen oben verschwinden nach 10 Sekunden von selbst.
 - Fertige Aufträge verschwinden automatisch aus der Warteschlange; der Knopf „Fertige entfernen“
