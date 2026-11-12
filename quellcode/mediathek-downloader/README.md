@@ -147,7 +147,7 @@ das Update unter Linux auch über `sudo apt upgrade`.
   und Bild ein anderes Seitenverhältnis haben oder es sich mitten im Video ändert. Das Ergebnis
   merkt sich das Programm bis zum Beenden. Tasten: Leertaste
   Pause, ←/→ 10 Sekunden (ohne Einblendung der Leiste), ↑/↓ Lautstärke, A Tonspur, S Untertitel, Z Balken aus/ein, +/− Zoom,
-  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, I Intro überspringen, Esc zurück, ? oder F1
+  0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, I Intro/Rückblick/Abspann überspringen, Esc zurück, ? oder F1
   blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
   Die Tooltips der Knöpfe nennen ihre Taste. Jede Taste lässt sich unter Einstellungen → „Tasten
@@ -172,6 +172,26 @@ das Update unter Linux auch über `sudo apt upgrade`.
   hat eine Staffel- und Folgennummer, und von der Serie ist mindestens eine weitere Folge geladen
   (sonst erscheint kein Knopf). Ganz kurze Titelkarten (unter 15 Sekunden)
   gelten nicht als Intro.
+  **Abspann:** Genauso erkennt der Player den Abspann in den letzten fünf Minuten der Folge (ab 10 Sekunden Länge; was danach weniger als 30 Sekunden bleibt, etwa eine Vorschau, zählt dazu)
+  (Ergebnis in `abspanne.tsv`). Währenddessen zeigt derselbe Knopf „Abspann überspringen“; er,
+  → und I springen zur nächsten Folge, ohne nächste Folge ans Ende des Abspanns. Von selbst
+  übersprungen wird der Abspann nie.
+  **Rückblicke:** „Was bisher geschah“ erkennt der Player daran, dass die ersten Minuten einer Folge
+  aus Ausschnitten der vorigen Folgen bestehen: Er zerlegt die ersten fünf Minuten in Stücke von
+  einer Sekunde und sucht jedes in den beiden vorigen Folgen; zählen nur Stücke, deren Nachbar an
+  derselben Stelle weiterläuft. Ein Abschnitt von 20 Sekunden bis drei Minuten am Anfang oder direkt
+  nach dem Intro, der aus mindestens drei verschiedenen Stellen stammt – oder aus dem Rückblick
+  einer Vorgängerfolge, denn Rückblicke wiederholen oft dieselben Szenen –, ist der Rückblick;
+  beginnt er in den ersten 20 Sekunden, gilt er ab dem Anfang. Zuerst über den Ton; passt der
+  nicht (Musik, Sprecher), über das Bild: zwei Bilder je Sekunde, verkleinert zu einem
+  64-Bit-Abdruck, unter Linux in der Grafikkarte dekodiert (VAAPI), unter Windows per D3D11.
+  Dann erscheint „Rückblick überspringen“ – folgt das Intro direkt, „Rückblick und Intro
+  überspringen“; → und I springen ebenso. Mit „Rückblicke automatisch überspringen“
+  (Einstellungen → Player) geschieht das von selbst. Die Abdrücke ganzer Folgen liegen im
+  Zwischenspeicher (nach 120 Tagen ohne Gebrauch gelöscht), das Ergebnis in `rueckblicke.tsv`.
+  Beim ersten Mal muss für den Bildvergleich jede Folge einmal ganz gelesen werden – mit
+  Grafikkarte einige Minuten, ohne deutlich länger, mit niedriger Priorität im Hintergrund nach dem
+  Download; die vorige Folge muss geladen sein.
 - **Fenstergröße** – die Kacheln füllen jede Breite, Leisten brechen um, und unter etwa 1000 Pixeln
   Breite werden die Reiter oben zu Symbolen (der Name steht im Tooltip). Das Fenster lässt sich so
   bis etwa 520 Pixel schmal machen.

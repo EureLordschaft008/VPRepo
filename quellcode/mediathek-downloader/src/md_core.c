@@ -4776,6 +4776,10 @@ bool md_detect_bars(const char *path, MdCrop *crop)
  * vorige Folge enthält, nicht als Intro. Anfang und Ende rücken danach auf den nächsten
  * Schnitt im Bild, denn der Fingerabdruck endet etwas früher. Ergebnisse stehen in
  * intros.tsv im Datenordner, je Datei (Pfad, Größe, Änderungszeit).
+ *
+ * Den Abspann findet dasselbe Verfahren in den letzten OUTRO_SCAN Sekunden (mindestens
+ * OUTRO_MIN lang); bleibt danach weniger als OUTRO_TAIL (etwa eine Vorschau), reicht er bis ans
+ * Ende. Ergebnisse stehen in abspanne.tsv.
  * ------------------------------------------------------------------------- */
 #define INTRO_SCAN 600
 #define INTRO_STEP (4096.0 / 3 / 11025)    /* Abstand der Chromaprint-Werte in Sekunden */
@@ -4786,22 +4790,31 @@ bool md_detect_bars(const char *path, MdCrop *crop)
 #define INTRO_SHIFTS 20                     /* so viele Versätze werden genau geprüft */
 #define INTRO_NEIGHBOURS 3
 #define INTRO_FINGERPRINTS 64               /* Fingerabdrücke im Speicher */
+#define OUTRO_SCAN 300
+#define OUTRO_MIN 10.0                      /* Abspänne im ZDF sind oft nur 15 Sekunden lang */
+#define OUTRO_TAIL 30.0                     /* so nah am Ende gilt der Abspann bis zum Schluss */
+
+typedef enum { PART_INTRO, PART_OUTRO, PART_RECAP } IntroPart;
 
 static GMutex intro_lock;
-static GHashTable *intro_cache;             /* Schlüssel -> double[2], Anfang < 0 = keins */
-static GHashTable *intro_prints;            /* Schlüssel -> GArray guint32 */
+static GHashTable *intro_cache[3];          /* Schlüssel -> double[2], Anfang < 0 = keins */
+static GHashTable *intro_prints;            /* Schlüssel + Teil -> GArray guint32 */
 
-static char *intro_cache_path(void)
+static char *intro_cache_path(IntroPart part)
 {
-    return g_build_filename(md_app_dir(), "intros.tsv", NULL);
+    return g_build_filename(md_app_dir(),
+                            part == PART_RECAP   ? "rueckblicke.tsv"
+                            : part == PART_OUTRO ? "abspanne.tsv"
+                                                 : "intros.tsv",
+                            NULL);
 }
 
 /* intro_lock gehalten */
-static void intro_cache_load(void)
+static void intro_cache_load(IntroPart part)
 {
-    if (intro_cache) return;
-    intro_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-    char *path = intro_cache_path(), *text = NULL;
+    if (intro_cache[part]) return;
+    intro_cache[part] = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    char *path = intro_cache_path(part), *text = NULL;
     if (g_file_get_contents(path, &text, NULL, NULL)) {
         char **lines = g_strsplit(text, "\n", -1);
         for (int i = 0; lines[i]; i++) {
@@ -4810,7 +4823,7 @@ static void intro_cache_load(void)
                 double *range = g_new(double, 2);
                 range[0] = g_ascii_strtod(f[1], NULL);
                 range[1] = g_ascii_strtod(f[2], NULL);
-                g_hash_table_replace(intro_cache, g_strcompress(f[0]), range);
+                g_hash_table_replace(intro_cache[part], g_strcompress(f[0]), range);
             }
             g_strfreev(f);
         }
@@ -4820,15 +4833,15 @@ static void intro_cache_load(void)
     g_free(text);
 }
 
-static void intro_cache_store(const char *key, double start, double end)
+static void intro_cache_store(IntroPart part, const char *key, double start, double end)
 {
     g_mutex_lock(&intro_lock);
-    intro_cache_load();
+    intro_cache_load(part);
     double *range = g_new(double, 2);
     range[0] = start;
     range[1] = end;
-    g_hash_table_replace(intro_cache, g_strdup(key), range);
-    char *escaped = g_strescape(key, NULL), *path = intro_cache_path();
+    g_hash_table_replace(intro_cache[part], g_strdup(key), range);
+    char *escaped = g_strescape(key, NULL), *path = intro_cache_path(part);
     char a[G_ASCII_DTOSTR_BUF_SIZE], b[G_ASCII_DTOSTR_BUF_SIZE];
     char *line = g_strdup_printf("%s\t%s\t%s\n", escaped, g_ascii_formatd(a, sizeof a, "%.2f", start),
                                  g_ascii_formatd(b, sizeof b, "%.2f", end));
@@ -4869,11 +4882,13 @@ static GArray *intro_fingerprint_pcm(const gint16 *samples, gsize count)
     return print;
 }
 
-/* Audio-Fingerabdruck der ersten INTRO_SCAN Sekunden; NULL = keiner (kein Ton) */
-static GArray *intro_fingerprint(const char *path)
+/* Audio-Fingerabdruck der ersten INTRO_SCAN bzw. letzten OUTRO_SCAN Sekunden; NULL = keiner */
+static GArray *intro_fingerprint(const char *path, IntroPart part)
 {
-    char *key = crop_cache_key(path);
-    if (!key) return NULL;
+    char *base = crop_cache_key(path);
+    if (!base) return NULL;
+    char *key = g_strconcat(base, part == PART_OUTRO ? "\tA" : "\tI", NULL);
+    g_free(base);
     g_mutex_lock(&intro_lock);
     if (!intro_prints)
         intro_prints = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
@@ -4893,11 +4908,11 @@ static GArray *intro_fingerprint(const char *path)
     }
     close(fd);
     char scan[16], rate[16];
-    g_snprintf(scan, sizeof scan, "%d", INTRO_SCAN);
+    g_snprintf(scan, sizeof scan, "%d", part == PART_OUTRO ? -OUTRO_SCAN : INTRO_SCAN);
     g_snprintf(rate, sizeof rate, "%d", INTRO_RATE);
     /* Ton als 16-Bit-PCM (Little Endian wie alle Zielsysteme), mono, INTRO_RATE */
-    char *argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-t", scan,
-                    "-i", (char *)path, "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1",
+    char *argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
+                    part == PART_OUTRO ? "-sseof" : "-t", scan, "-i", (char *)path, "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1",
                     "-ar", rate, "-c:a", "pcm_s16le", "-f", "s16le", "-y", tmp, NULL};
     char *data = NULL;
     gsize length = 0;
@@ -4931,8 +4946,8 @@ static int print_entry_cmp(const void *a, const void *b)
 }
 
 /* Gemeinsamer Abschnitt zweier Fingerabdrücke -> Lage in a in Sekunden; false = keiner */
-static bool intro_match(const guint32 *a, int na, const guint32 *b, int nb, double *start,
-                        double *end)
+static bool intro_match(const guint32 *a, int na, const guint32 *b, int nb, double min_seconds,
+                        double *start, double *end)
 {
     if (na < 1 || nb < 1) return false;
     PrintEntry *sorted = g_new(PrintEntry, nb);
@@ -4950,7 +4965,7 @@ static bool intro_match(const guint32 *a, int na, const guint32 *b, int nb, doub
         for (int k = lo; k < nb && sorted[k].value == a[i]; k++) counts[sorted[k].pos - i + na]++;
     }
     g_free(sorted);
-    int gap = (int)(INTRO_GAP / INTRO_STEP), min_len = (int)(INTRO_MIN / INTRO_STEP);
+    int gap = (int)(INTRO_GAP / INTRO_STEP), min_len = (int)(min_seconds / INTRO_STEP);
     int max_len = (int)(INTRO_MAX / INTRO_STEP), best_start = -1, best_end = -1;
     for (int round = 0; round < INTRO_SHIFTS; round++) {
         int top = 0;
@@ -4998,19 +5013,24 @@ static GArray *scene_cuts(const char *path, double from, double length)
     return cuts;
 }
 
-/* Anfang und Ende auf den nächsten Schnitt legen */
-static void intro_snap(const char *path, double *start, double *end)
+/* Anfang und Ende auf den nächsten Schnitt legen; duration > 0: Abspann bis ans Ende */
+static void intro_snap(const char *path, double *start, double *end, double duration)
 {
-    GArray *cuts = scene_cuts(path, *end - 0.5, 3.0);
-    for (guint i = 0; i < cuts->len; i++) {
-        double at = g_array_index(cuts, double, i);
-        if (at >= *end - 0.3) {
-            *end = at;
-            break;
+    GArray *cuts;
+    if (duration > 0 && duration - *end <= OUTRO_TAIL) {
+        *end = duration;
+    } else {
+        cuts = scene_cuts(path, *end - 0.5, 3.0);
+        for (guint i = 0; i < cuts->len; i++) {
+            double at = g_array_index(cuts, double, i);
+            if (at >= *end - 0.3) {
+                *end = at;
+                break;
+            }
         }
+        g_array_unref(cuts);
     }
-    g_array_unref(cuts);
-    if (*start <= 1.0) {
+    if (*start <= 1.0 && duration <= 0) {
         *start = 0;
         return;
     }
@@ -5045,8 +5065,9 @@ static void neighbour_free(gpointer data)
     g_free(n);
 }
 
-/* Andere Folgen derselben Serie aus dem Verlauf, die nächsten zuerst; NULL = keine Serie */
-static GPtrArray *intro_neighbours(const char *path)
+/* Andere Folgen derselben Serie aus dem Verlauf, die nächsten zuerst; NULL = keine Serie.
+ * self: Staffel und Folge der Datei selbst, wenn gewünscht */
+static GPtrArray *intro_neighbours_of(const char *path, IntroNeighbour *self_out)
 {
     g_mutex_lock(&q.lock);
     const History *self = g_hash_table_find(q.history, history_has_path, (gpointer)path);
@@ -5081,18 +5102,25 @@ static GPtrArray *intro_neighbours(const char *path)
         if (file_size(((IntroNeighbour *)list->pdata[i])->path) <= 0)
             g_ptr_array_remove_index(list, i);
     g_ptr_array_sort_with_data(list, neighbour_cmp, &me);
+    if (self_out) *self_out = me;
     return list;
+}
+
+static GPtrArray *intro_neighbours(const char *path)
+{
+    return intro_neighbours_of(path, NULL);
 }
 
 typedef struct {
     const char *path;
     GArray *print;
+    IntroPart part;
 } IntroPrintJob;
 
 static gpointer intro_print_thread(gpointer data)
 {
     IntroPrintJob *job = data;
-    job->print = intro_fingerprint(job->path);
+    job->print = intro_fingerprint(job->path, job->part);
     return NULL;
 }
 
@@ -5105,11 +5133,12 @@ static void intro_prints_parallel(IntroPrintJob *jobs, int count)
 }
 
 /* Abschnitt mit dem Nachbarn n vergleichen; false = keine Übereinstimmung */
-static bool intro_against(GArray *self, GArray *other, double *start, double *end)
+static bool intro_against(GArray *self, GArray *other, double min_seconds, double *start,
+                          double *end)
 {
     return self && other &&
            intro_match((guint32 *)self->data, (int)self->len, (guint32 *)other->data,
-                       (int)other->len, start, end);
+                       (int)other->len, min_seconds, start, end);
 }
 
 static void intro_pool_run(gpointer data, gpointer user)
@@ -5117,6 +5146,8 @@ static void intro_pool_run(gpointer data, gpointer user)
     (void)user;
     double start, end;
     md_find_intro(data, &start, &end);
+    md_find_outro(data, &start, &end);
+    md_find_recap(data, &start, &end);
     g_free(data);
 }
 
@@ -5133,13 +5164,13 @@ static void intro_queue(const char *path)
     if (pool) g_thread_pool_push(pool, g_strdup(path), NULL);
 }
 
-bool md_find_intro(const char *path, double *start, double *end)
+static bool find_part(const char *path, IntroPart part, double *start, double *end)
 {
     char *key = crop_cache_key(path);
     if (!key) return false;
     g_mutex_lock(&intro_lock);
-    intro_cache_load();
-    const double *cached = g_hash_table_lookup(intro_cache, key);
+    intro_cache_load(part);
+    const double *cached = g_hash_table_lookup(intro_cache[part], key);
     bool known = cached != NULL, found = cached && cached[0] >= 0;
     if (found) {
         *start = cached[0];
@@ -5158,13 +5189,18 @@ bool md_find_intro(const char *path, double *start, double *end)
         return false;
     }
     int count = MIN((int)neighbours->len, INTRO_NEIGHBOURS);
-    IntroPrintJob jobs[INTRO_NEIGHBOURS + 1] = {{path, NULL}};
-    for (int i = 0; i < count; i++) jobs[i + 1].path = ((IntroNeighbour *)neighbours->pdata[i])->path;
+    IntroPrintJob jobs[INTRO_NEIGHBOURS + 1] = {{path, NULL, part}};
+    for (int i = 0; i < count; i++) {
+        jobs[i + 1].path = ((IntroNeighbour *)neighbours->pdata[i])->path;
+        jobs[i + 1].part = part;
+    }
     /* erst die eigene und zwei Nachbarn, den dritten nur bei Bedarf */
     intro_prints_parallel(jobs, MIN(count, 2) + 1);
     double s[INTRO_NEIGHBOURS], e[INTRO_NEIGHBOURS];
     bool hit[INTRO_NEIGHBOURS] = {false};
-    for (int i = 0; i < MIN(count, 2); i++) hit[i] = intro_against(jobs[0].print, jobs[i + 1].print, &s[i], &e[i]);
+    double min_seconds = part == PART_OUTRO ? OUTRO_MIN : INTRO_MIN;
+    for (int i = 0; i < MIN(count, 2); i++)
+        hit[i] = intro_against(jobs[0].print, jobs[i + 1].print, min_seconds, &s[i], &e[i]);
     found = false;
     if (count == 1) {
         found = hit[0];
@@ -5175,7 +5211,7 @@ bool md_find_intro(const char *path, double *start, double *end)
             /* kein Intro: merken */
         } else if (!(hit[0] && hit[1]) && count > 2) {
             intro_prints_parallel(&jobs[3], 1);
-            hit[2] = intro_against(jobs[0].print, jobs[3].print, &s[2], &e[2]);
+            hit[2] = intro_against(jobs[0].print, jobs[3].print, min_seconds, &s[2], &e[2]);
         }
         /* zwei Bestätigungen, deren Abschnitte sich decken */
         for (int i = 0; i < count && !found; i++)
@@ -5183,7 +5219,7 @@ bool md_find_intro(const char *path, double *start, double *end)
                 if (!hit[i] || !hit[k]) continue;
                 *start = MAX(s[i], s[k]);
                 *end = MIN(e[i], e[k]);
-                found = *end - *start >= INTRO_MIN;
+                found = *end - *start >= min_seconds;
             }
     }
     /* ohne eigenen Fingerabdruck (Werkzeug fehlt) nichts merken */
@@ -5195,9 +5231,416 @@ bool md_find_intro(const char *path, double *start, double *end)
         g_free(key);
         return false;
     }
-    if (found) intro_snap(path, start, end);
-    intro_cache_store(key, found ? *start : -1, found ? *end : -1);
-    if (found) md_log("Intro erkannt: %s, %.1f–%.1f s", path, *start, *end);
+    if (found && part == PART_OUTRO) {
+        /* Lage im Ende der Datei -> Zeit ab Anfang */
+        char *codec = NULL;
+        double duration = 0;
+        media_info(path, &codec, &duration);
+        g_free(codec);
+        if (duration <= 0) found = false;
+        else {
+            /* der Fingerabdruck beginnt OUTRO_SCAN Sekunden vor dem Ende */
+            double offset = MAX(0, duration - OUTRO_SCAN);
+            *start += offset;
+            *end += offset;
+            intro_snap(path, start, end, duration);
+        }
+    } else if (found) intro_snap(path, start, end, 0);
+    intro_cache_store(part, key, found ? *start : -1, found ? *end : -1);
+    if (found)
+        md_log("%s erkannt: %s, %.1f–%.1f s", part == PART_OUTRO ? "Abspann" : "Intro", path,
+               *start, *end);
+    g_free(key);
+    return found;
+}
+
+bool md_find_intro(const char *path, double *start, double *end)
+{
+    return find_part(path, PART_INTRO, start, end);
+}
+
+bool md_find_outro(const char *path, double *start, double *end)
+{
+    return find_part(path, PART_OUTRO, start, end);
+}
+
+/* ---------------------------------------------------------------------------
+ * Rückblicke erkennen („Was bisher geschah“)
+ *
+ * Ein Rückblick besteht aus kurzen Ausschnitten früherer Folgen. Die ersten RECAP_SCAN
+ * Sekunden einer Folge werden in Blöcke von etwa RECAP_BLOCK Sekunden zerlegt, und jeder Block
+ * wird in den ganzen vorigen Folgen (höchstens RECAP_REFS) gesucht. Ein Treffer zählt nur, wenn
+ * der Nachbarblock dieselbe Stelle fortsetzt (sonst ist es oft Zufall). Treffer mit Lücken bis
+ * RECAP_GAP bilden Abschnitte; ein Abschnitt von RECAP_MIN bis RECAP_MAX, der am Anfang oder
+ * direkt nach dem Intro liegt und aus mindestens RECAP_CLIPS verschiedenen Stellen stammt – oder
+ * zum größeren Teil aus dem Rückblick einer Vorlage –, ist der Rückblick. Intro und Abspann der
+ * Vorlagen sind ausgenommen.
+ *
+ * Zuerst über den Ton (Chromaprint wie beim Intro). Spricht ein Sprecher über die Szenen, passt
+ * der Ton nicht mehr; dann über das Bild: zwei Bilder je Sekunde, verkleinert auf 9×8
+ * Graustufen, ergeben je einen 64-Bit-dHash. Die Abdrücke ganzer Folgen liegen im
+ * Zwischenspeicher (*.tonabdruck, *.bildabdruck), damit die nächste Folge sie wiederverwendet.
+ * Ergebnisse stehen in rueckblicke.tsv.
+ * ------------------------------------------------------------------------- */
+#define RECAP_SCAN 300.0
+#define RECAP_BLOCK 1.0
+#define RECAP_GAP 15.0
+#define RECAP_LEAD 20.0                     /* beginnt er so früh, gilt er ab dem Anfang */
+#define RECAP_MIN 20.0
+#define RECAP_MAX 180.0
+#define RECAP_LATEST 90.0                   /* so spät darf er ohne Intro davor beginnen */
+#define RECAP_AFTER_INTRO 15.0              /* so lange nach dem Intro auch */
+#define RECAP_CLIPS 3
+#define RECAP_REFS 2
+#define RECAP_AUDIO_BITS 8
+#define RECAP_VIDEO_BITS 10
+#define RECAP_VIDEO_FPS 2
+#define RECAP_PRINT_KEEP_SECONDS (120 * 24 * 3600)   /* ungenutzte Abdrücke so lange behalten */
+
+/* Fingerabdruck der ganzen Datei; video: dHash der Bilder statt Chromaprint des Tons.
+ * Liegt er im Zwischenspeicher, von dort. NULL = keiner */
+static GArray *recap_print(const char *path, bool video)
+{
+    char *key = crop_cache_key(path);
+    if (!key) return NULL;
+    char *file = cache_file(key, video ? ".bildabdruck" : ".tonabdruck");
+    g_free(key);
+    char *data = NULL;
+    gsize length = 0;
+    GArray *print = NULL;
+    if (g_file_get_contents(file, &data, &length, NULL) && length >= 8 * 16) {
+        print = g_array_sized_new(FALSE, FALSE, sizeof(guint64), (guint)(length / 8));
+        g_array_append_vals(print, data, (guint)(length / 8));
+        g_free(data);
+        g_utime(file, NULL);                /* in Gebrauch: nicht aufräumen */
+        g_free(file);
+        return print;
+    }
+    g_free(data);
+    data = NULL;
+    char *tmp = NULL;
+    int fd = g_file_open_tmp("mediathek-rueckblick-XXXXXX.raw", &tmp, NULL);
+    if (fd < 0) {
+        g_free(file);
+        return NULL;
+    }
+    close(fd);
+    char rate[16], filter[64], gpu_filter[160];
+    g_snprintf(rate, sizeof rate, "%d", INTRO_RATE);
+    g_snprintf(filter, sizeof filter, "fps=%d,scale=9:8:flags=area,format=gray", RECAP_VIDEO_FPS);
+    g_snprintf(gpu_filter, sizeof gpu_filter,
+               "fps=%d,scale_vaapi=w=64:h=36,hwdownload,format=nv12,scale=9:8:flags=area,format=gray",
+               RECAP_VIDEO_FPS);
+    char *audio_argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-i", (char *)path,
+                          "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", rate,
+                          "-c:a", "pcm_s16le", "-f", "s16le", "-y", tmp, NULL};
+    /* Das Bild ganzer Folgen zu dekodieren kostet viel (AV1 in Software etwa ein Fünftel der
+     * Laufzeit): darum möglichst in der Grafikkarte, die es dort auch gleich verkleinert. Kann
+     * sie das Format nicht, scheitert der Filter, und es geht in Software weiter. */
+    char *video_argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
+#ifdef G_OS_WIN32
+                          "-hwaccel", "d3d11va",
+#endif
+                          "-i", (char *)path, "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filter,
+                          "-f", "rawvideo", "-y", tmp, NULL};
+    bool done = false;
+#ifndef G_OS_WIN32
+    const char *device = video ? render_device() : NULL;
+    if (device) {
+        char *gpu_argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-hwaccel",
+                            "vaapi", "-hwaccel_device", (char *)device, "-hwaccel_output_format",
+                            "vaapi", "-i", (char *)path, "-map", "0:v:0", "-an", "-sn", "-dn",
+                            "-vf", gpu_filter, "-f", "rawvideo", "-y", tmp, NULL};
+        done = run_capture_with(gpu_argv, NULL, NULL, true) == 0;
+    }
+#endif
+    (void)gpu_filter;
+    if (!done) done = run_capture_with(video ? video_argv : audio_argv, NULL, NULL, true) == 0;
+    if (done && g_file_get_contents(tmp, &data, &length, NULL)) {
+        if (video) {
+            gsize frames = length / 72;
+            print = g_array_sized_new(FALSE, FALSE, sizeof(guint64), (guint)frames);
+            for (gsize f = 0; f < frames; f++) {
+                const guint8 *px = (const guint8 *)data + f * 72;
+                guint64 hash = 0;
+                for (int r = 0; r < 8; r++)
+                    for (int c = 0; c < 8; c++)
+                        hash = hash << 1 | (px[r * 9 + c] > px[r * 9 + c + 1]);
+                g_array_append_val(print, hash);
+            }
+        } else {
+            GArray *raw = intro_fingerprint_pcm((const gint16 *)data, length / 2);
+            if (raw) {
+                print = g_array_sized_new(FALSE, FALSE, sizeof(guint64), raw->len);
+                for (guint i = 0; i < raw->len; i++) {
+                    guint64 v = g_array_index(raw, guint32, i);
+                    g_array_append_val(print, v);
+                }
+                g_array_unref(raw);
+            }
+        }
+    }
+    g_free(data);
+    g_unlink(tmp);
+    g_free(tmp);
+    if (print && print->len < 16) g_clear_pointer(&print, g_array_unref);
+    if (print) g_file_set_contents(file, print->data, (gssize)print->len * 8, NULL);
+    g_free(file);
+    return print;
+}
+
+typedef struct {
+    const guint64 *v;
+    int n;
+    int skip[2][2];         /* Intro und Abspann der Vorlage (Wertindizes), -1 = keiner */
+    int recap[2];           /* ihr eigener Rückblick, leer = keiner bekannt */
+} RecapRef;
+
+/* liegt das Stück j .. j + len der Vorlage in ihrem Intro oder Abspann? */
+static bool recap_ref_skipped(const RecapRef *ref, int j, int len)
+{
+    for (int i = 0; i < 2; i++)
+        if (ref->skip[i][0] >= 0 && j + len > ref->skip[i][0] && j < ref->skip[i][1]) return true;
+    return false;
+}
+
+/* Treffer eines Blocks an Stelle j der Vorlage */
+static int recap_hits(const guint64 *x, int blk, const RecapRef *ref, int j, int max_bits, int best)
+{
+    int hits = 0;
+    for (int k = 0; k < blk && hits + (blk - k) > best; k++)
+        hits += __builtin_popcountll(x[k] ^ ref->v[j + k]) <= max_bits;
+    return hits;
+}
+
+/* kaum Inhalt (Schwarzbild, Stille): gleiche Werte oder dHash fast leer */
+static bool recap_block_blank(const guint64 *a, int len)
+{
+    int same = 0, empty = 0;
+    for (int k = 0; k < len; k++) {
+        same += a[k] == a[0];
+        empty += __builtin_popcountll(a[k]) <= 2 || __builtin_popcountll(a[k]) >= 62;
+    }
+    return same == len || empty * 2 > len;
+}
+
+/* Rückblick in a (Anfang einer Folge) suchen: Blöcke, die in refs vorkommen. step: Sekunden je
+ * Wert; skip_from/skip_to: Intro (ausgenommen), < 0 = keins. false = keiner */
+static bool recap_match(const guint64 *a, int na, const RecapRef *refs, int nrefs, double step,
+                        int max_bits, double skip_from, double skip_to, double *start, double *end)
+{
+    int blk = MAX(2, (int)(RECAP_BLOCK / step + 0.5));
+    int blocks = MIN(na, (int)(RECAP_SCAN / step)) / blk;
+    if (blocks < 1 || nrefs < 1) return false;
+    /* je Block: Vorlage und Stelle des besten Treffers, -1 = keiner */
+    int *ref_of = g_new(int, blocks), *pos_of = g_new(int, blocks);
+    for (int b = 0; b < blocks; b++) {
+        ref_of[b] = pos_of[b] = -1;
+        const guint64 *x = a + b * blk;
+        double at = b * blk * step, until = (b + 1) * blk * step;
+        if ((skip_from >= 0 && until > skip_from && at < skip_to) || recap_block_blank(x, blk))
+            continue;
+        int need = (blk * 5 + 7) / 8, best = need - 1;
+        /* setzt der vorige Block fort, bleibt es bei dessen Stelle (eine Melodie kann an
+         * mehreren Stellen vorkommen und würde sonst wie mehrere Ausschnitte zählen) */
+        if (b > 0 && ref_of[b - 1] >= 0) {
+            const RecapRef *ref = &refs[ref_of[b - 1]];
+            int j = pos_of[b - 1] + blk;
+            if (j + blk <= ref->n && recap_hits(x, blk, ref, j, max_bits, need - 1) >= need) {
+                ref_of[b] = ref_of[b - 1];
+                pos_of[b] = j;
+                continue;
+            }
+        }
+        for (int r = 0; r < nrefs; r++)
+            for (int j = 0; j + blk <= refs[r].n; j++) {
+                int hits = recap_hits(x, blk, &refs[r], j, max_bits, best);
+                if (hits > best && !recap_ref_skipped(&refs[r], j, blk)) {
+                    best = hits;
+                    ref_of[b] = r;
+                    pos_of[b] = j;
+                }
+            }
+    }
+    /* Einzelne Treffer sind oft Zufall (ähnliche Musik, Stimmen): Ein Block zählt nur, wenn ein
+     * Nachbar dieselbe Stelle fortsetzt, der Ausschnitt also mindestens zwei Blöcke lang ist */
+    bool *kept = g_new0(bool, blocks);
+    for (int b = 0; b + 1 < blocks; b++)
+        if (ref_of[b] >= 0 && ref_of[b + 1] == ref_of[b] &&
+            ABS(pos_of[b + 1] - pos_of[b] - blk) <= 1)
+            kept[b] = kept[b + 1] = true;
+    for (int b = 0; b < blocks; b++)
+        if (!kept[b]) ref_of[b] = -1;
+    g_free(kept);
+    /* Abschnitte aus Treffern mit kleinen Lücken; Ausschnitte zählen, wo die Stelle springt */
+    int gap = MAX(1, (int)(RECAP_GAP / (blk * step)));
+    bool found = false;
+    for (int b = 0; b < blocks && !found;) {
+        if (ref_of[b] < 0) {
+            b++;
+            continue;
+        }
+        /* Was zum Rückblick einer Vorlage passt, ist selbst einer: Rückblicke zeigen oft
+         * dieselben alten Szenen und sehen dann wie ein einziger Ausschnitt aus */
+        const RecapRef *r0 = &refs[ref_of[b]];
+        int first = b, last = b, clips = 1, prev = b, matched = 1;
+        int in_recap = pos_of[b] >= r0->recap[0] && pos_of[b] < r0->recap[1];
+        for (int c = b + 1; c < blocks && c - last <= gap; c++) {
+            if (ref_of[c] < 0) continue;
+            int expect = pos_of[prev] + (c - prev) * blk;
+            if (ref_of[c] != ref_of[prev] || ABS(pos_of[c] - expect) > blk) clips++;
+            const RecapRef *rc = &refs[ref_of[c]];
+            matched++;
+            in_recap += pos_of[c] >= rc->recap[0] && pos_of[c] < rc->recap[1];
+            prev = last = c;
+        }
+        bool like_recap = clips >= RECAP_CLIPS || (in_recap >= 2 && in_recap * 2 >= matched);
+        double s = first * blk * step, e = (last + 1) * blk * step;
+        bool placed = s <= RECAP_LATEST || (skip_to >= 0 && s >= skip_to - 1 &&
+                                            s <= skip_to + RECAP_AFTER_INTRO);
+        if (s <= RECAP_LEAD) s = 0;
+        if (placed && like_recap && e - s >= RECAP_MIN && e - s <= RECAP_MAX) {
+            *start = s;
+            *end = e;
+            found = true;
+        }
+        b = last + 1;
+    }
+    g_free(ref_of);
+    g_free(pos_of);
+    return found;
+}
+
+typedef struct {
+    const char *path;
+    bool video;
+    GArray *print;
+} RecapPrintJob;
+
+static gpointer recap_print_thread(gpointer data)
+{
+    RecapPrintJob *job = data;
+    job->print = recap_print(job->path, job->video);
+    return NULL;
+}
+
+/* schon bekannter Rückblick einer Datei, ohne zu suchen */
+static bool recap_cached(const char *path, double *start, double *end)
+{
+    char *key = crop_cache_key(path);
+    if (!key) return false;
+    g_mutex_lock(&intro_lock);
+    intro_cache_load(PART_RECAP);
+    const double *cached = g_hash_table_lookup(intro_cache[PART_RECAP], key);
+    bool found = cached && cached[0] >= 0;
+    if (found) {
+        *start = cached[0];
+        *end = cached[1];
+    }
+    g_mutex_unlock(&intro_lock);
+    g_free(key);
+    return found;
+}
+
+/* eigener Abdruck und die der Vorlagen, gleichzeitig; dann abgleichen */
+static bool recap_try(const char *path, char **refs, int nrefs, bool video, double skip_from,
+                      double skip_to, double *start, double *end, bool *usable)
+{
+    RecapPrintJob jobs[RECAP_REFS + 1] = {{path, video, NULL}};
+    GThread *threads[RECAP_REFS + 1];
+    for (int i = 0; i < nrefs; i++) jobs[i + 1] = (RecapPrintJob){refs[i], video, NULL};
+    for (int i = 0; i <= nrefs; i++) threads[i] = g_thread_new("rueckblick", recap_print_thread, &jobs[i]);
+    for (int i = 0; i <= nrefs; i++) g_thread_join(threads[i]);
+    double step = video ? 1.0 / RECAP_VIDEO_FPS : INTRO_STEP;
+    RecapRef list[RECAP_REFS];
+    int count = 0;
+    for (int i = 1; i <= nrefs; i++) {
+        if (!jobs[i].print) continue;
+        RecapRef *ref = &list[count++];
+        *ref = (RecapRef){(const guint64 *)jobs[i].print->data, (int)jobs[i].print->len,
+                          {{-1, -1}, {-1, -1}}, {0, 0}};
+        /* Intro und Abspann der Vorlage stehen meist schon fest, ihr Rückblick nur, wenn er
+         * schon gesucht wurde (nicht hier rechnen: das zöge eine Kette früherer Folgen nach) */
+        double from, to;
+        if (recap_cached(refs[i - 1], &from, &to))
+            ref->recap[0] = (int)(from / step), ref->recap[1] = (int)(to / step) + 1;
+        if (md_find_intro(refs[i - 1], &from, &to))
+            ref->skip[0][0] = (int)(from / step), ref->skip[0][1] = (int)(to / step) + 1;
+        if (md_find_outro(refs[i - 1], &from, &to))
+            ref->skip[1][0] = (int)(from / step), ref->skip[1][1] = (int)(to / step) + 1;
+    }
+    bool found = false;
+    if (jobs[0].print) {
+        *usable = true;
+        found = recap_match((const guint64 *)jobs[0].print->data, (int)jobs[0].print->len, list,
+                            count, step, video ? RECAP_VIDEO_BITS : RECAP_AUDIO_BITS, skip_from,
+                            skip_to, start, end);
+    }
+    for (int i = 0; i <= nrefs; i++)
+        if (jobs[i].print) g_array_unref(jobs[i].print);
+    return found;
+}
+
+bool md_find_recap(const char *path, double *start, double *end)
+{
+    char *key = crop_cache_key(path);
+    if (!key) return false;
+    g_mutex_lock(&intro_lock);
+    intro_cache_load(PART_RECAP);
+    const double *cached = g_hash_table_lookup(intro_cache[PART_RECAP], key);
+    bool known = cached != NULL, found = cached && cached[0] >= 0;
+    if (found) {
+        *start = cached[0];
+        *end = cached[1];
+    }
+    g_mutex_unlock(&intro_lock);
+    if (known) {
+        g_free(key);
+        return found;
+    }
+    /* nur frühere Folgen derselben Serie, die letzten davor zuerst (zu Staffelbeginn also das
+     * Ende der vorigen Staffel) */
+    IntroNeighbour me = {NULL, 0, 0};
+    GPtrArray *neighbours = intro_neighbours_of(path, &me);
+    char *refs[RECAP_REFS];
+    int nrefs = 0, own = me.season * 1000 + me.episode;
+    while (neighbours && nrefs < RECAP_REFS) {
+        int pick = -1, best = -1;
+        for (guint i = 0; i < neighbours->len; i++) {
+            const IntroNeighbour *n = neighbours->pdata[i];
+            int at = n->season * 1000 + n->episode;
+            bool taken = false;
+            for (int k = 0; k < nrefs; k++) taken = taken || refs[k] == n->path;
+            if (at < own && at > best && !taken) best = at, pick = (int)i;
+        }
+        if (pick < 0) break;
+        refs[nrefs++] = ((IntroNeighbour *)neighbours->pdata[pick])->path;
+    }
+    if (!nrefs) {
+        /* erste geladene Folge: nicht merken, die vorige kommt vielleicht noch */
+        if (neighbours) g_ptr_array_free(neighbours, TRUE);
+        g_free(key);
+        return false;
+    }
+    double intro_start = -1, intro_end = -1;
+    if (!md_find_intro(path, &intro_start, &intro_end)) intro_start = intro_end = -1;
+    bool usable = false, by_video = false;
+    found = recap_try(path, refs, nrefs, false, intro_start, intro_end, start, end, &usable);
+    if (!found) {
+        bool seen = false;
+        found = by_video = recap_try(path, refs, nrefs, true, intro_start, intro_end, start, end, &seen);
+        usable = usable || seen;
+    }
+    g_ptr_array_free(neighbours, TRUE);
+    if (!usable) {
+        g_free(key);
+        return false;
+    }
+    if (found) intro_snap(path, start, end, 0);
+    intro_cache_store(PART_RECAP, key, found ? *start : -1, found ? *end : -1);
+    if (found)
+        md_log("Rückblick erkannt (%s): %s, %.1f–%.1f s", by_video ? "Bild" : "Ton", path, *start,
+               *end);
     g_free(key);
     return found;
 }
@@ -5887,10 +6330,12 @@ static gpointer cache_clean_thread(gpointer data)
     int removed = 0;
     time_t now = time(NULL);
     while (d && (name = g_dir_read_name(d))) {
-        if (!g_str_has_suffix(name, ".suche")) continue;
+        bool print = g_str_has_suffix(name, "abdruck");
+        if (!g_str_has_suffix(name, ".suche") && !print) continue;
         char *path = g_build_filename(dir, name, NULL);
         GStatBuf st;
-        if (g_stat(path, &st) == 0 && now - st.st_mtime > CACHE_SEARCH_KEEP_SECONDS &&
+        if (g_stat(path, &st) == 0 &&
+            now - st.st_mtime > (print ? RECAP_PRINT_KEEP_SECONDS : CACHE_SEARCH_KEEP_SECONDS) &&
             g_unlink(path) == 0)
             removed++;
         g_free(path);

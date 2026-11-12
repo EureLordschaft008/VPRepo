@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.7.1"
+#define MD_VERSION "2.8.0"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */
@@ -166,6 +166,10 @@ bool md_detect_bars(const char *path, MdCrop *crop);   /* dauert einige Sekunden
  * Beim ersten Mal dauert es einige Sekunden, danach steht es in intros.tsv. false = keins
  * (oder keine zweite Folge der Serie da) */
 bool md_find_intro(const char *path, double *start, double *end);
+/* Abspann genauso über das Ende benachbarter Folgen (abspanne.tsv); false = keiner */
+bool md_find_outro(const char *path, double *start, double *end);
+/* Rückblick („Was bisher geschah“) über Ton und Bild früherer Folgen (rueckblicke.tsv) */
+bool md_find_recap(const char *path, double *start, double *end);
 
 /* Start mit der Anmeldung (Linux: ~/.config/autostart, Windows: Registry „Run“) */
 bool md_autostart_enabled(void);

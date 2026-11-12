@@ -9,7 +9,9 @@
  *
  * Tasten: siehe KEY_ACTIONS; jede Aktion hat eine Taste, die sich in den Einstellungen ändern
  * lässt (md_player_key_set), dazu feste Zweittasten wie K/J/L, solange keine Aktion sie belegt.
- * → springt während des Intros ans Ende des Intros statt 10 Sekunden.
+ * → springt während des Intros ans Ende des Intros statt 10 Sekunden, während eines Rückblicks
+ * an sein Ende (folgt gleich das Intro, auch darüber), während des Abspanns zur nächsten Folge
+ * (ohne nächste Folge ans Ende des Abspanns).
  *
  * Bild im Bild: Wählt man bei laufendem Video einen anderen Reiter, zieht die Seite in ein kleines
  * Fenster über allen anderen und spielt dort weiter. Doppelklick oder der Knopf in der Leiste
@@ -100,6 +102,10 @@ typedef struct {
     MdCrop bars;                /* Bereich mit Inhalt, wenn Balken fest im Bild sind */
     bool intro_known, intro_found, intro_was_in;   /* intro_was_in: letzter Takt im Intro */
     double intro_start, intro_end;
+    bool outro_found, outro_was_in;                /* Abspann, genauso */
+    double outro_start, outro_end;
+    bool recap_found, recap_was_in;                /* Rückblick („Was bisher geschah“) */
+    double recap_start, recap_end;
     bool pointer_known;         /* pointer_x/y: Mausstelle, ab der eine Bewegung zählt */
     double pointer_x, pointer_y;
     guint tick, hide_timer, osd_timer, inhibit;
@@ -109,7 +115,8 @@ typedef struct {
 
 static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
-static bool auto_skip_intro;
+static bool auto_skip_intro, auto_skip_recap;
+#define RECAP_INTRO_GAP 5.0     /* so knapp nach dem Rückblick zählt das Intro als direkt danach */
 
 /* ---------------------------------------------------------------------------
  * Tastenbelegung
@@ -129,7 +136,7 @@ static const struct {
 } KEY_ACTIONS[KEY_COUNT] = {
     [KEY_PLAY] = {"Abspielen", "Abspielen / Pause", GDK_KEY_space, {GDK_KEY_k}, false},
     [KEY_BACK] = {"Zurueckspulen", "10 Sekunden zurück", GDK_KEY_Left, {GDK_KEY_j}, true},
-    [KEY_FORWARD] = {"Vorspulen", "10 Sekunden vor (im Intro: Intro überspringen)",
+    [KEY_FORWARD] = {"Vorspulen", "10 Sekunden vor (Intro, Rückblick, Abspann: überspringen)",
                      GDK_KEY_Right, {GDK_KEY_l}, true},
     [KEY_VOLUME_UP] = {"Lauter", "Lauter", GDK_KEY_Up, {0}, true},
     [KEY_VOLUME_DOWN] = {"Leiser", "Leiser", GDK_KEY_Down, {0}, true},
@@ -143,7 +150,7 @@ static const struct {
     [KEY_FULLSCREEN] = {"Vollbild", "Vollbild (auch Doppelklick)", GDK_KEY_f, {GDK_KEY_F11},
                         false},
     [KEY_NEXT] = {"NaechsteFolge", "Nächste Folge", GDK_KEY_n, {0}, false},
-    [KEY_INTRO] = {"Intro", "Intro überspringen", GDK_KEY_i, {0}, false},
+    [KEY_INTRO] = {"Intro", "Intro / Rückblick / Abspann überspringen", GDK_KEY_i, {0}, false},
     [KEY_CLOSE] = {"Zurueck", "Zurück (im Vollbild: Vollbild verlassen)", GDK_KEY_Escape, {0},
                    false},
     [KEY_HELP] = {"Tastenhilfe", "Diese Übersicht", GDK_KEY_question, {GDK_KEY_F1}, true},
@@ -705,8 +712,8 @@ static void find_bars(Player *p)
 
 typedef struct {
     char *path;
-    double start, end;
-    bool found;
+    double start, end, outro_start, outro_end;
+    bool found, outro_found;
 } IntroJob;
 
 static gboolean on_intro_done(gpointer data)
@@ -718,6 +725,23 @@ static gboolean on_intro_done(gpointer data)
         p->intro_found = job->found;
         p->intro_start = job->start;
         p->intro_end = job->end;
+        p->outro_found = job->outro_found;
+        p->outro_start = job->outro_start;
+        p->outro_end = job->outro_end;
+    }
+    g_free(job->path);
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_recap_done(gpointer data)
+{
+    IntroJob *job = data;
+    Player *p = player;
+    if (p && p->path && !strcmp(p->path, job->path)) {
+        p->recap_found = job->found;
+        p->recap_start = job->start;
+        p->recap_end = job->end;
     }
     g_free(job->path);
     g_free(job);
@@ -728,14 +752,22 @@ static gpointer intro_thread(gpointer data)
 {
     IntroJob *job = data;
     job->found = md_find_intro(job->path, &job->start, &job->end);
+    job->outro_found = md_find_outro(job->path, &job->outro_start, &job->outro_end);
+    /* der Rückblick braucht beim ersten Mal länger: Intro und Abspann schon vorher melden */
+    IntroJob *recap = g_new0(IntroJob, 1);
+    recap->path = g_strdup(job->path);
     g_timeout_add_full(G_PRIORITY_DEFAULT, 0, on_intro_done, job, NULL);
+    recap->found = md_find_recap(recap->path, &recap->start, &recap->end);
+    g_timeout_add_full(G_PRIORITY_DEFAULT, 0, on_recap_done, recap, NULL);
     return NULL;
 }
 
-/* Intro suchen (Ton benachbarter Folgen, beim ersten Mal einige Sekunden) */
+/* Intro und Abspann suchen (Ton benachbarter Folgen, beim ersten Mal einige Sekunden) */
 static void find_intro(Player *p)
 {
     p->intro_known = p->intro_found = p->intro_was_in = false;
+    p->outro_found = p->outro_was_in = false;
+    p->recap_found = p->recap_was_in = false;
     if (p->intro_button) gtk_widget_hide(p->intro_button);
     IntroJob *job = g_new0(IntroJob, 1);
     job->path = g_strdup(p->path);
@@ -1258,30 +1290,114 @@ static void skip_intro(Player *p)
     seek_to(p, p->intro_end, GST_SEEK_FLAG_ACCURATE);
 }
 
-/* 10 Sekunden vor; läuft gerade das Intro, gleich an sein Ende */
-static void skip_forward(Player *p)
+/* Abspann überspringen: weiter mit der nächsten Folge, sonst ans Ende des Abspanns */
+static void skip_outro(Player *p)
 {
+    if (!p->outro_found) return;
+    gtk_widget_hide(p->intro_button);
+    p->outro_was_in = false;
+    if (p->next_path) play_next(p);
+    else seek_to(p, p->outro_end, GST_SEEK_FLAG_ACCURATE);
+}
+
+/* Ende des Rückblicks; folgt gleich das Intro, dessen Ende */
+static double recap_target(const Player *p)
+{
+    if (p->intro_found && p->intro_start >= p->recap_end - 1.0 &&
+        p->intro_start - p->recap_end <= RECAP_INTRO_GAP)
+        return p->intro_end;
+    return p->recap_end;
+}
+
+static void skip_recap(Player *p)
+{
+    if (!p->recap_found) return;
+    gtk_widget_hide(p->intro_button);
+    p->recap_was_in = p->intro_was_in = false;
+    bool with_intro = recap_target(p) != p->recap_end;
+    seek_to(p, recap_target(p), GST_SEEK_FLAG_ACCURATE);
+    show_osd(p, with_intro ? "Rückblick und Intro übersprungen" : "Rückblick übersprungen");
+}
+
+/* Intro, Rückblick oder Abspann überspringen, je nachdem, was gerade läuft -> false = keins */
+static bool skip_section(Player *p)
+{
+    if (p->recap_found && p->recap_was_in) {
+        skip_recap(p);
+        return true;
+    }
     if (p->intro_found && p->intro_was_in) {
         skip_intro(p);
         p->intro_was_in = false;
         show_osd(p, "Intro übersprungen");
-        return;
+        return true;
     }
-    skip(p, SEEK_STEP);
+    if (p->outro_found && p->outro_was_in) {
+        bool next = p->next_path != NULL;
+        skip_outro(p);
+        if (!next) show_osd(p, "Abspann übersprungen");
+        return true;
+    }
+    return false;
+}
+
+/* 10 Sekunden vor; läuft gerade Intro oder Abspann, gleich darüber hinweg */
+static void skip_forward(Player *p)
+{
+    if (!skip_section(p)) skip(p, SEEK_STEP);
 }
 
 static void on_intro_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
-    skip_intro(data);
+    skip_section(data);
+}
+
+/* Aufschrift nur bei Änderung setzen: on_tick läuft mehrmals in der Sekunde */
+static void set_skip_label(Player *p, const char *label)
+{
+    if (g_strcmp0(gtk_button_get_label(GTK_BUTTON(p->intro_button)), label))
+        gtk_button_set_label(GTK_BUTTON(p->intro_button), label);
 }
 
 /* Läuft das Intro: Knopf zeigen oder, wenn eingestellt, gleich überspringen. Wer
- * zurückspult, ins Intro hinein, sieht es: übersprungen wird nur beim Hineinlaufen */
+ * zurückspult, ins Intro hinein, sieht es: übersprungen wird nur beim Hineinlaufen.
+ * Beim Rückblick genauso (eigene Einstellung); im Abspann erscheint derselbe Knopf als
+ * „Abspann überspringen“ (nie von selbst) */
 static void update_intro(Player *p)
 {
-    if (!p->intro_found || !p->prerolled) return;
+    if (!p->prerolled || (!p->intro_found && !p->outro_found && !p->recap_found)) return;
     double pos = current_position(p);
+    if (p->recap_found) {
+        bool in = !p->ended && pos >= p->recap_start - 0.2 && pos < p->recap_end - 1.0;
+        bool entered = in && !p->recap_was_in;
+        if (p->playing || !in) p->recap_was_in = in;
+        if (entered && auto_skip_recap && p->playing && p->seek_target < 0) {
+            skip_recap(p);
+            return;
+        }
+        if (in) {
+            set_skip_label(p, recap_target(p) != p->recap_end ? "Rückblick und Intro überspringen"
+                                                               : "Rückblick überspringen");
+            gtk_widget_set_visible(p->intro_button, !p->pip_window);
+            return;
+        }
+    }
+    if (p->outro_found) {
+        bool in = !p->ended && pos >= p->outro_start - 0.2 && pos < p->outro_end - 1.0;
+        if (p->playing || !in) p->outro_was_in = in;
+        if (in) {
+            set_skip_label(p, p->next_path ? "Abspann überspringen · nächste Folge"
+                                           : "Abspann überspringen");
+            gtk_widget_set_visible(p->intro_button, !p->pip_window);
+            return;
+        }
+    }
+    set_skip_label(p, "Intro überspringen");
+    if (!p->intro_found) {
+        gtk_widget_hide(p->intro_button);
+        return;
+    }
     bool in = !p->ended && pos >= p->intro_start - 0.2 && pos < p->intro_end - 1.0;
     bool entered = in && !p->intro_was_in;
     /* vor dem Start zählt das Hineinlaufen erst, wenn das Video läuft */
@@ -1382,9 +1498,7 @@ static gboolean on_key(GtkWidget *w, GdkEventKey *e, gpointer data)
     case KEY_VOLUME_DOWN: change_volume(p, -VOLUME_STEP); break;
     case KEY_FULLSCREEN: toggle_fullscreen(p); break;
     case KEY_NEXT: play_next(p); break;
-    case KEY_INTRO:
-        if (p->intro_was_in) skip_intro(p);
-        break;
+    case KEY_INTRO: skip_section(p); break;
     case KEY_AUDIO: next_audio(p); break;
     case KEY_TEXT: next_text(p); break;
     case KEY_FILL: set_fill(p, !p->fill); break;
@@ -1810,7 +1924,7 @@ static void apply_key_tips(Player *p)
     set_key_tip(p->back_button, "10 Sekunden zurück", KEY_BACK);
     set_key_tip(p->forward_button, "10 Sekunden vor", KEY_FORWARD);
     set_key_tip(p->fullscreen, "Vollbild", KEY_FULLSCREEN);
-    set_key_tip(p->intro_button, "Intro überspringen", KEY_INTRO);
+    set_key_tip(p->intro_button, "Intro / Rückblick / Abspann überspringen", KEY_INTRO);
     update_play_button(p);
     if (!p->next_title) set_key_tip(p->next, "Nächste Folge", KEY_NEXT);
     else {
@@ -1960,6 +2074,11 @@ static Player *player_new(GtkStack *stack)
 /* ---------------------------------------------------------------------------
  * Schnittstelle
  * ------------------------------------------------------------------------- */
+void md_player_set_auto_skip_recap(bool on)
+{
+    auto_skip_recap = on;
+}
+
 void md_player_set_auto_skip_intro(bool on)
 {
     auto_skip_intro = on;

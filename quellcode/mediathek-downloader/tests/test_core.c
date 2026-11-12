@@ -424,6 +424,48 @@ static void test_audio_only(void)
     for (size_t i = 0; i < G_N_ELEMENTS(all); i++) md_title_free(all[i]);
 }
 
+/* Rückblick: Ausschnitte aus mehreren Stellen der vorigen Folge, das Intro (eine Stelle) nicht */
+static void test_recap_match(void)
+{
+    GRand *rand = g_rand_new_with_seed(11);
+    double step = 0.5;                      /* wie beim Bild: zwei Werte je Sekunde */
+    int na = 600, nb = 5400;
+    guint64 *a = g_new(guint64, na), *b = g_new(guint64, nb);
+    for (int i = 0; i < na; i++) a[i] = (guint64)g_rand_int(rand) << 32 | g_rand_int(rand);
+    for (int i = 0; i < nb; i++) b[i] = (guint64)g_rand_int(rand) << 32 | g_rand_int(rand);
+    /* Rückblick ab 4 s: vier Ausschnitte zu je 8 s aus verschiedenen Stellen, leicht verrauscht */
+    const int from[] = {3000, 900, 4100, 2200};
+    for (int c = 0; c < 4; c++)
+        for (int i = 0; i < 16; i++) {
+            guint64 v = b[from[c] + i];
+            a[8 + c * 16 + i] = i % 5 == 2 ? v ^ 0x0101010101ull : v;
+        }
+    RecapRef ref = {b, nb, {{-1, -1}, {-1, -1}}, {0, 0}};
+    double start = 0, end = 0;
+    g_assert_true(recap_match(a, na, &ref, 1, step, 10, -1, -1, &start, &end));
+    g_assert_cmpfloat(start, ==, 0);         /* so früh: ab dem Anfang */
+    g_assert_cmpfloat(ABS(end - 36.0), <=, 2.0);
+    /* nur ein zusammenhängendes Stück (wie ein Intro): kein Rückblick */
+    for (int i = 0; i < na; i++) a[i] = (guint64)g_rand_int(rand) << 32 | g_rand_int(rand);
+    for (int i = 0; i < 80; i++) a[20 + i] = b[1500 + i];
+    g_assert_false(recap_match(a, na, &ref, 1, step, 10, -1, -1, &start, &end));
+    /* dasselbe Stück an zwei Stellen der Vorlage (Melodie in Intro und Abspann) bleibt eines */
+    for (int i = 0; i < 80; i++) b[4500 + i] = b[1500 + i];
+    g_assert_false(recap_match(a, na, &ref, 1, step, 10, -1, -1, &start, &end));
+    /* ein Stück, das im Rückblick der Vorlage liegt, ist auch einer */
+    ref.recap[0] = 1490;
+    ref.recap[1] = 1600;
+    g_assert_true(recap_match(a, na, &ref, 1, step, 10, -1, -1, &start, &end));
+    g_assert_cmpfloat(ABS(end - 50.0), <=, 2.0);
+    ref.recap[0] = ref.recap[1] = 0;
+    /* Zufall: nichts */
+    for (int i = 0; i < na; i++) a[i] = (guint64)g_rand_int(rand) << 32 | g_rand_int(rand);
+    g_assert_false(recap_match(a, na, &ref, 1, step, 10, -1, -1, &start, &end));
+    g_free(a);
+    g_free(b);
+    g_rand_free(rand);
+}
+
 /* Intro: gemeinsamer Abschnitt zweier Fingerabdrücke, leicht verrauscht und versetzt */
 static void test_intro_match(void)
 {
@@ -438,13 +480,13 @@ static void test_intro_match(void)
         b[100 + i] = i % 7 == 3 ? v ^ 0x00010101u : v;  /* hier und da 3 Bits anders */
     }
     double start = 0, end = 0;
-    g_assert_true(intro_match(a, na, b, nb, &start, &end));
+    g_assert_true(intro_match(a, na, b, nb, INTRO_MIN, &start, &end));
     g_assert_cmpfloat(ABS(start - 1300 * INTRO_STEP), <, 0.5);
     g_assert_cmpfloat(ABS(end - (1300 + len - 1) * INTRO_STEP), <, 0.5);
     /* zu kurz (10 s) zählt nicht */
     for (int i = 0; i < nb; i++) b[i] = g_rand_int(rand);
     for (int i = 0; i < 80; i++) b[500 + i] = a[1300 + i];
-    g_assert_false(intro_match(a, na, b, nb, &start, &end));
+    g_assert_false(intro_match(a, na, b, nb, INTRO_MIN, &start, &end));
     g_free(a);
     g_free(b);
     g_rand_free(rand);
@@ -635,6 +677,7 @@ int main(int argc, char **argv)
     g_test_add_func("/update/pruefsummen", test_update_sums);
     g_test_add_func("/suche/doppelte-folgen", test_duplicate_episodes);
     g_test_add_func("/player/intro-abschnitt", test_intro_match);
+    g_test_add_func("/player/rueckblick", test_recap_match);
     g_test_add_func("/suche/hoerfassung", test_hear_version);
     g_test_add_func("/suche/nur-ton", test_audio_only);
     g_test_add_func("/av1/schwarze-balken", test_crop_bars);

@@ -282,6 +282,7 @@ typedef struct {
     char *update_skip;          /* diese Version nicht mehr anbieten */
     bool auto_news;             /* neue Folgen geladener Serien von selbst laden */
     bool skip_intro;            /* erkannte Intros im Player von selbst überspringen */
+    bool skip_recap;            /* erkannte Rückblicke ebenso */
     bool gpu_convert;           /* Player: Farbumrechnung in der Grafikkarte */
     bool hold_downloads, hold_conversions;  /* alle Downloads bzw. Umwandlungen angehalten */
 } Config;
@@ -899,6 +900,8 @@ static void settings_load(void)
     c->auto_news = settings_bool(file, "NeueFolgenLaden", false);
     c->skip_intro = settings_bool(file, "IntroUeberspringen", false);
     md_player_set_auto_skip_intro(c->skip_intro);
+    c->skip_recap = settings_bool(file, "RueckblickUeberspringen", false);
+    md_player_set_auto_skip_recap(c->skip_recap);
     c->gpu_convert = settings_bool(file, "PlayerGrafikkarte", true);
     md_player_set_gpu_convert(c->gpu_convert);
     /* Tasten des Players: nur abweichende stehen in der Datei, als GDK-Tastenname */
@@ -942,6 +945,7 @@ static void settings_save(void)
     g_key_file_set_boolean(file, SETTINGS_GROUP, "UpdateSuchen", c->update_check);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "NeueFolgenLaden", c->auto_news);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "IntroUeberspringen", c->skip_intro);
+    g_key_file_set_boolean(file, SETTINGS_GROUP, "RueckblickUeberspringen", c->skip_recap);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "PlayerGrafikkarte", c->gpu_convert);
     for (int i = 0; i < md_player_key_count(); i++) {
         guint key = md_player_key_get(i);
@@ -6467,7 +6471,7 @@ static void add_key_settings(GtkWidget *page)
 /* gemeinsamer Handler aller übrigen Einstellungen: alles einlesen und speichern */
 static GtkWidget *quality_combo, *encoder_combo, *gpu_spin, *cpu_spin, *parallel_spin;
 static GtkWidget *convert_spin, *av1_switch, *keep_switch, *signed_switch, *audio_switch, *min_spin;
-static GtkWidget *update_switch, *news_switch, *intro_switch, *gpu_switch;
+static GtkWidget *update_switch, *news_switch, *intro_switch, *recap_switch, *gpu_switch;
 
 static void on_setting_changed(GtkWidget *w, gpointer d)
 {
@@ -6499,6 +6503,8 @@ static void on_setting_changed(GtkWidget *w, gpointer d)
     c->update_check = gtk_switch_get_active(GTK_SWITCH(update_switch));
     c->skip_intro = gtk_switch_get_active(GTK_SWITCH(intro_switch));
     md_player_set_auto_skip_intro(c->skip_intro);
+    c->skip_recap = gtk_switch_get_active(GTK_SWITCH(recap_switch));
+    md_player_set_auto_skip_recap(c->skip_recap);
     if (gpu_switch) {
         c->gpu_convert = gtk_switch_get_active(GTK_SWITCH(gpu_switch));
         md_player_set_gpu_convert(c->gpu_convert);
@@ -6639,8 +6645,16 @@ static GtkWidget *build_settings_page(void)
     intro_switch = new_setting_switch(c->skip_intro);
     add_row(player_group, "Intros automatisch überspringen",
             "Der Vorspann einer Serie wird am Ton erkannt, den mehrere Folgen gemeinsam haben. "
-            "Ausgeschaltet erscheint während des Intros der Knopf „Intro überspringen“.", NULL,
+            "Ausgeschaltet erscheint während des Intros der Knopf „Intro überspringen“. "
+            "Den Abspann erkennt der Player genauso; er wird nie von selbst übersprungen, "
+            "der Knopf „Abspann überspringen“ führt zur nächsten Folge.", NULL,
             intro_switch, NULL);
+    recap_switch = new_setting_switch(c->skip_recap);
+    add_row(player_group, "Rückblicke automatisch überspringen",
+            "„Was bisher geschah“ wird an Ton oder Bild erkannt, die aus früheren Folgen stammen; "
+            "dazu muss die vorige Folge geladen sein. Ausgeschaltet erscheint der Knopf "
+            "„Rückblick überspringen“; folgt gleich das Intro, springt er auch darüber.", NULL,
+            recap_switch, NULL);
     if (md_player_gpu_convert_possible()) {
         gpu_switch = new_setting_switch(c->gpu_convert);
         add_row(player_group, "Bild in der Grafikkarte umrechnen",

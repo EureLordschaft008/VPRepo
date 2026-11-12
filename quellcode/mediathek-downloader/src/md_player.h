@@ -45,6 +45,8 @@ void md_player_set_gpu_convert(bool on);
 bool md_player_gpu_convert_possible(void);
 /* Erkannte Intros von selbst überspringen statt nur den Knopf zu zeigen */
 void md_player_set_auto_skip_intro(bool on);
+/* Erkannte Rückblicke („Was bisher geschah“) von selbst überspringen */
+void md_player_set_auto_skip_recap(bool on);
 /* Tasten des Players, je Zeile "Taste\tWirkung"; gilt bis zum nächsten Aufruf */
 const char *md_player_keys_text(void);
 /* Tastenbelegung: Aktionen 0 … count−1 mit Namen für die Einstellungsdatei (id), Wirkung,
