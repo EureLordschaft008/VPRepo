@@ -64,6 +64,12 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.8.1 (12.11.2026)
+- Fehlt der Grafikkarte beim Umwandeln kurz Speicher, versucht das Programm es nach 30 Sekunden
+  noch zweimal dort, statt gleich auf den viel langsameren Prozessor auszuweichen.
+- Die Rückblick-Erkennung dekodiert die Folgen nacheinander und, solange eine Umwandlung die
+  Grafikkarte nutzt, in Software.
+
 ### 2.8.0 (12.11.2026)
 - Abspann überspringen: Der Player erkennt den Abspann am Ton benachbarter Folgen; der Knopf
   „Abspann überspringen“ (auch → und I) führt zur nächsten Folge.
