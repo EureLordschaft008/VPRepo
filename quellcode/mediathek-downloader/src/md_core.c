@@ -5299,6 +5299,22 @@ bool md_find_outro(const char *path, double *start, double *end)
 
 /* Fingerabdruck der ganzen Datei; video: dHash der Bilder statt Chromaprint des Tons.
  * Liegt er im Zwischenspeicher, von dort. NULL = keiner */
+/* wandelt gerade ein Auftrag über die Grafikkarte um? Dann dekodiert die Rückblick-Erkennung
+ * in Software: Beides zusammen kann der Grafikkarte den Speicher nehmen, und die Umwandlung
+ * fiele auf den viel langsameren Prozessor zurück. */
+static bool gpu_converting(void)
+{
+    bool busy = false;
+    g_mutex_lock(&q.lock);
+    for (guint i = 0; q.jobs && i < q.jobs->len && !busy; i++) {
+        const Job *j = q.jobs->pdata[i];
+        busy = j->state == MD_JOB_CONVERTING && j->convert && !j->merging &&
+               j->encoder == MD_ENCODER_GPU;
+    }
+    g_mutex_unlock(&q.lock);
+    return busy;
+}
+
 static GArray *recap_print(const char *path, bool video)
 {
     char *key = crop_cache_key(path);
@@ -5337,15 +5353,16 @@ static GArray *recap_print(const char *path, bool video)
     /* Das Bild ganzer Folgen zu dekodieren kostet viel (AV1 in Software etwa ein Fünftel der
      * Laufzeit): darum möglichst in der Grafikkarte, die es dort auch gleich verkleinert. Kann
      * sie das Format nicht, scheitert der Filter, und es geht in Software weiter. */
+    bool gpu = video && !gpu_converting();
     char *video_argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
 #ifdef G_OS_WIN32
-                          "-hwaccel", "d3d11va",
+                          "-hwaccel", gpu ? "d3d11va" : "none",
 #endif
                           "-i", (char *)path, "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filter,
                           "-f", "rawvideo", "-y", tmp, NULL};
     bool done = false;
 #ifndef G_OS_WIN32
-    const char *device = video ? render_device() : NULL;
+    const char *device = gpu ? render_device() : NULL;
     if (device) {
         char *gpu_argv[] = {"ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-hwaccel",
                             "vaapi", "-hwaccel_device", (char *)device, "-hwaccel_output_format",
@@ -5517,13 +5534,6 @@ typedef struct {
     GArray *print;
 } RecapPrintJob;
 
-static gpointer recap_print_thread(gpointer data)
-{
-    RecapPrintJob *job = data;
-    job->print = recap_print(job->path, job->video);
-    return NULL;
-}
-
 /* schon bekannter Rückblick einer Datei, ohne zu suchen */
 static bool recap_cached(const char *path, double *start, double *end)
 {
@@ -5542,15 +5552,14 @@ static bool recap_cached(const char *path, double *start, double *end)
     return found;
 }
 
-/* eigener Abdruck und die der Vorlagen, gleichzeitig; dann abgleichen */
+/* eigener Abdruck und die der Vorlagen, nacheinander (drei Folgen gleichzeitig zu dekodieren
+ * nähme Umwandlungen zu viel Rechenzeit und Grafikspeicher); dann abgleichen */
 static bool recap_try(const char *path, char **refs, int nrefs, bool video, double skip_from,
                       double skip_to, double *start, double *end, bool *usable)
 {
     RecapPrintJob jobs[RECAP_REFS + 1] = {{path, video, NULL}};
-    GThread *threads[RECAP_REFS + 1];
     for (int i = 0; i < nrefs; i++) jobs[i + 1] = (RecapPrintJob){refs[i], video, NULL};
-    for (int i = 0; i <= nrefs; i++) threads[i] = g_thread_new("rueckblick", recap_print_thread, &jobs[i]);
-    for (int i = 0; i <= nrefs; i++) g_thread_join(threads[i]);
+    for (int i = 0; i <= nrefs; i++) jobs[i].print = recap_print(jobs[i].path, video);
     double step = video ? 1.0 / RECAP_VIDEO_FPS : INTRO_STEP;
     RecapRef list[RECAP_REFS];
     int count = 0;
@@ -5748,6 +5757,32 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
 
 /* ffmpeg ausführen -> 0 = fertig, -1 = unterbrochen, sonst Fehler (die letzten
  * ffmpeg-Meldungen landen in *messages) */
+#define GPU_RETRIES 2
+#define GPU_RETRY_WAIT 30
+
+static bool gpu_out_of_memory(const char *messages)
+{
+    return messages && (strstr(messages, "Cannot allocate memory") ||
+                        strstr(messages, "out of memory") || strstr(messages, "Out of memory") ||
+                        strstr(messages, "VA_STATUS_ERROR_ALLOCATION_FAILED") ||
+                        strstr(messages, "E_OUTOFMEMORY"));
+}
+
+/* wartet bis zu seconds Sekunden; false, wenn der Auftrag entfernt oder das Programm beendet
+ * wird. Pausieren hält die Uhr an. */
+static bool convert_pause(Job *j, int seconds)
+{
+    for (int ticks = seconds * 2; ticks > 0;) {
+        g_mutex_lock(&q.lock);
+        bool end = j->remove_requested || q.quitting, pause = j->paused || q.conversions_held;
+        g_mutex_unlock(&q.lock);
+        if (end) return false;
+        g_usleep(G_USEC_PER_SEC / 2);
+        if (!pause) ticks--;
+    }
+    return true;
+}
+
 static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *crop, const char *tmp,
                        double duration, char **messages)
 {
@@ -5877,6 +5912,22 @@ static gpointer convert_thread(gpointer data)
         g_mutex_unlock(&q.lock);
         g_clear_pointer(&messages, g_free);
         int rc = run_encoder(j, copy, j->encoder, crop, tmp, duration, &messages);
+        /* fehlt der Grafikkarte kurz Speicher (andere Umwandlung, Player, Erkennung), lohnt
+         * ein zweiter Versuch dort mehr als stundenlang auf dem Prozessor */
+        for (int retry = 1; rc > 0 && !copy && j->encoder == MD_ENCODER_GPU &&
+                            retry <= GPU_RETRIES && gpu_out_of_memory(messages); retry++) {
+            md_log("Grafikkarte hat zu wenig Speicher, neuer Versuch %d/%d in %d s: %s",
+                   retry, GPU_RETRIES, GPU_RETRY_WAIT, j->title);
+            if (!convert_pause(j, GPU_RETRY_WAIT)) {
+                rc = -1;
+                break;
+            }
+            g_clear_pointer(&messages, g_free);
+            g_mutex_lock(&q.lock);
+            j->progress = 0;
+            g_mutex_unlock(&q.lock);
+            rc = run_encoder(j, false, MD_ENCODER_GPU, crop, tmp, duration, &messages);
+        }
         if (rc > 0 && !copy && j->encoder == MD_ENCODER_GPU) {
             md_log("GPU-Umwandlung fehlgeschlagen, versuche CPU: %s (%s)", j->title, messages);
             g_clear_pointer(&messages, g_free);

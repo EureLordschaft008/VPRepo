@@ -184,7 +184,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   einer Vorgängerfolge, denn Rückblicke wiederholen oft dieselben Szenen –, ist der Rückblick;
   beginnt er in den ersten 20 Sekunden, gilt er ab dem Anfang. Zuerst über den Ton; passt der
   nicht (Musik, Sprecher), über das Bild: zwei Bilder je Sekunde, verkleinert zu einem
-  64-Bit-Abdruck, unter Linux in der Grafikkarte dekodiert (VAAPI), unter Windows per D3D11.
+  64-Bit-Abdruck, unter Linux in der Grafikkarte dekodiert (VAAPI), unter Windows per D3D11 –
+  eine Folge nach der anderen, und solange eine Umwandlung die Grafikkarte nutzt, in Software.
   Dann erscheint „Rückblick überspringen“ – folgt das Intro direkt, „Rückblick und Intro
   überspringen“; → und I springen ebenso. Mit „Rückblicke automatisch überspringen“
   (Einstellungen → Player) geschieht das von selbst. Die Abdrücke ganzer Folgen liegen im
@@ -227,7 +228,8 @@ das Update unter Linux auch über `sudo apt upgrade`.
   schneidet es dabei ab; ffmpeg prüft dafür jedes Schlüsselbild der ganzen Datei, ein schmaler Rand
   bleibt stehen, und im Zweifel bleibt das Bild ganz. Mit der Grafikkarte dekodiert sie auch das
   Ausgangsvideo: unter Linux per VA-API samt Zuschneiden, etwa dreimal so schnell und fast ohne
-  Last für den Prozessor; unter Windows per D3D11VA, DXVA2 oder CUDA, was die Karte kann. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  Last für den Prozessor; unter Windows per D3D11VA, DXVA2 oder CUDA, was die Karte kann. Fehlt der Grafikkarte kurz Speicher, versucht es das Programm nach
+  30 Sekunden noch zweimal dort, erst dann übernimmt der Prozessor. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
   lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).
