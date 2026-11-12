@@ -64,6 +64,12 @@ ist die letzte Zahl die Paketversion: Das Programm bleibt gleich, nur das Paket 
 
 Bis Version 1.2 hieß das Programm ZDF-Downloader.
 
+### 2.8.2 (12.11.2026)
+- Umwandlungen über die Grafikkarte weichen nicht mehr auf den Prozessor aus. Bei manchen Dateien
+  scheiterte das Umrechnen in der Grafikkarte kurz vor dem Ende; dann dekodiert jetzt der
+  Prozessor, und die Grafikkarte kodiert weiter – genauso schnell.
+- Die Lautstärke des Players bleibt über einen Neustart erhalten.
+
 ### 2.8.1 (12.11.2026)
 - Fehlt der Grafikkarte beim Umwandeln kurz Speicher, versucht das Programm es nach 30 Sekunden
   noch zweimal dort, statt gleich auf den viel langsameren Prozessor auszuweichen.
