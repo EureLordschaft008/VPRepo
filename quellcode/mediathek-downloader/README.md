@@ -150,6 +150,7 @@ das Update unter Linux auch über `sudo apt upgrade`.
   0 ganzes Bild, M stumm, F oder Doppelklick Vollbild, N nächste Folge, I Intro/Rückblick/Abspann überspringen, Esc zurück, ? oder F1
   blendet diese Übersicht im Bild ein. Springen,
   Lautstärke, Zoom und Spurwechsel blenden die Leiste nicht ein, sondern nur einen kurzen Hinweis.
+  Die Lautstärke bleibt über einen Neustart erhalten (`Lautstaerke` in `einstellungen.ini`).
   Die Tooltips der Knöpfe nennen ihre Taste. Jede Taste lässt sich unter Einstellungen → „Tasten
   im Player“ ändern: Klick auf die Taste, dann die neue drücken; gehört sie schon einer anderen
   Aktion, tauschen die beiden, und „Standard“ stellt alles zurück. Übersicht und Tooltips nennen
@@ -228,8 +229,10 @@ das Update unter Linux auch über `sudo apt upgrade`.
   schneidet es dabei ab; ffmpeg prüft dafür jedes Schlüsselbild der ganzen Datei, ein schmaler Rand
   bleibt stehen, und im Zweifel bleibt das Bild ganz. Mit der Grafikkarte dekodiert sie auch das
   Ausgangsvideo: unter Linux per VA-API samt Zuschneiden, etwa dreimal so schnell und fast ohne
-  Last für den Prozessor; unter Windows per D3D11VA, DXVA2 oder CUDA, was die Karte kann. Fehlt der Grafikkarte kurz Speicher, versucht es das Programm nach
-  30 Sekunden noch zweimal dort, erst dann übernimmt der Prozessor. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
+  Last für den Prozessor; unter Windows per D3D11VA, DXVA2 oder CUDA, was die Karte kann. Eine Umwandlung über die Grafikkarte bleibt dort: Scheitert sie,
+  dekodiert im zweiten Versuch der Prozessor, und die Grafikkarte kodiert nur noch (bei manchen
+  Dateien scheitert das Umrechnen in der Grafikkarte kurz vor dem Ende); fehlt ihr dann kurz
+  Speicher, folgen nach 30 Sekunden noch zwei Versuche. Auf den Prozessor weicht sie nie aus. Das Ergebnis wird geprüft; erst dann verschwindet die MP4-Datei. Schon geladene Dateien
   lassen sich in „Meine Videos“ nachträglich umwandeln; Tonspuren und Untertitel bleiben erhalten.
 - **Autostart** – auf Wunsch startet das Programm minimiert mit der Anmeldung (Linux:
   `~/.config/autostart`, Windows: Registry unter „Run“).

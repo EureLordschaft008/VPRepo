@@ -4555,8 +4555,9 @@ bool md_gpu_available(void)
 
 /* Bild per Grafikkarte nach AV1, Qualität als konstanter Quantisierer */
 static void add_gpu_encoder(GPtrArray *a, const char *encoder, const char *quality,
-                            const char *crop)
+                            const char *crop, bool gpu_decode)
 {
+    (void)gpu_decode;
     if (crop) args_add(a, (const char *const[]){"-vf", crop, NULL});
     args_add(a, (const char *const[]){"-pix_fmt", "p010le", "-c:v", encoder, NULL});
     if (!strcmp(encoder, "av1_nvenc"))
@@ -4592,7 +4593,7 @@ bool md_gpu_available(void)
 
 /* Bild per VAAPI nach AV1 */
 static void add_gpu_encoder(GPtrArray *a, const char *device, const char *quality,
-                            const char *crop)
+                            const char *crop, bool gpu_decode)
 {
     (void)device;
     /* Die Bilder kommen aus der Grafikkarte (dann reicht hwupload sie durch) oder, wenn sie das
@@ -4602,8 +4603,14 @@ static void add_gpu_encoder(GPtrArray *a, const char *device, const char *qualit
     char *size = crop && sscanf(crop, "crop=%d:%d:", &width, &height) == 2
                      ? g_strdup_printf("w=%d:h=%d:", width, height)
                      : g_strdup("");
-    char *filter = g_strdup_printf("%s%sformat=nv12|p010|vaapi,hwupload,scale_vaapi=%sformat=p010",
-                                   crop ? crop : "", crop ? "," : "", size);
+    /* Ohne Dekodieren in der Grafikkarte rechnet der Prozessor nach 10 Bit um und lädt die
+     * Bilder hoch: scale_vaapi scheitert bei manchen Dateien kurz vor dem Ende („Cannot
+     * allocate memory“, gesehen bei Notruf Hafenkante), auch mit Bildern aus dem Prozessor. */
+    char *filter = gpu_decode
+                       ? g_strdup_printf("%s%sformat=nv12|p010|vaapi,hwupload,scale_vaapi=%sformat=p010",
+                                         crop ? crop : "", crop ? "," : "", size)
+                       : g_strdup_printf("%s%sformat=p010,hwupload", crop ? crop : "",
+                                         crop ? "," : "");
     g_free(size);
     args_add(a, (const char *const[]){"-vf", filter, "-c:v", "av1_vaapi",
                                       "-rc_mode", "CQP", "-global_quality:v", quality,
@@ -5677,14 +5684,19 @@ static void add_track_metadata(GPtrArray *argv, char kind, int index, const char
 /* ffmpeg-Befehl bauen: Bild aus der Hauptdatei, dazu alle vorhandenen Spuren.
  * copy = Bild unverändert übernehmen, sonst AV1 mit dem gewählten Encoder; crop = Filter gegen
  * schwarze Balken oder NULL. */
-static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, const char *device,
-                                   const char *crop, const char *tmp)
+static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, bool gpu_decode,
+                                   const char *device, const char *crop, const char *tmp)
 {
     GPtrArray *a = g_ptr_array_new_with_free_func(g_free);
     args_add(a, (const char *const[]){"ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel",
                                       "error", "-progress", "pipe:1", "-nostats", NULL});
 #ifndef G_OS_WIN32
-    if (!copy && encoder == MD_ENCODER_GPU) {
+    if (!copy && encoder == MD_ENCODER_GPU && !gpu_decode) {
+        char *init = g_strdup_printf("vaapi=va:%s", device);
+        args_add(a, (const char *const[]){"-init_hw_device", init, "-filter_hw_device", "va",
+                                          NULL});
+        g_free(init);
+    } else if (!copy && encoder == MD_ENCODER_GPU) {
         /* auch dekodieren und nach 10 Bit umrechnen soll die Grafikkarte: Im Prozessor kostete
          * das bei 1080p50 das Dreifache an Zeit und fast die ganze Rechenlast. Kann sie das
          * Format nicht dekodieren, dekodiert ffmpeg von selbst im Prozessor. */
@@ -5698,7 +5710,7 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
     /* Windows: dekodieren in der Grafikkarte (D3D11VA, DXVA2 oder CUDA, was geht); die Bilder
      * kommen in den Hauptspeicher zurück, Zuschneiden und Umrechnen bleiben wie bisher. Geht
      * keiner der Wege, dekodiert ffmpeg im Prozessor. */
-    if (!copy && encoder == MD_ENCODER_GPU)
+    if (!copy && encoder == MD_ENCODER_GPU && gpu_decode)
         args_add(a, (const char *const[]){"-hwaccel", "auto", NULL});
 #endif
     args_add(a, (const char *const[]){"-i", j->target, NULL});
@@ -5735,7 +5747,7 @@ static GPtrArray *build_ffmpeg_cmd(const Job *j, bool copy, MdEncoder encoder, c
         args_add(a, (const char *const[]){"-c:v", "copy", NULL});
     } else if (encoder == MD_ENCODER_GPU) {
         snprintf(quality, sizeof quality, "%d", j->gpu_quality);
-        add_gpu_encoder(a, device, quality, crop);
+        add_gpu_encoder(a, device, quality, crop, gpu_decode);
     } else {
         snprintf(quality, sizeof quality, "%d", j->cpu_rf);
         char *filter = g_strdup_printf("%s%sformat=yuv420p10le", crop ? crop : "",
@@ -5783,15 +5795,16 @@ static bool convert_pause(Job *j, int seconds)
     return true;
 }
 
-static int run_encoder(Job *j, bool copy, MdEncoder encoder, const char *crop, const char *tmp,
-                       double duration, char **messages)
+static int run_encoder(Job *j, bool copy, MdEncoder encoder, bool gpu_decode, const char *crop,
+                       const char *tmp, double duration, char **messages)
 {
     const char *device = render_device();
     if (!copy && encoder == MD_ENCODER_GPU && !device) {
         *messages = g_strdup("Keine Grafikkarte mit AV1-Encoder gefunden.");
         return 1;
     }
-    GPtrArray *command = build_ffmpeg_cmd(j, copy, encoder, device, copy ? NULL : crop, tmp);
+    GPtrArray *command = build_ffmpeg_cmd(j, copy, encoder, gpu_decode, device,
+                                          copy ? NULL : crop, tmp);
     char **argv = (char **)command->pdata;
 
     GPid pid = 0;
@@ -5911,11 +5924,23 @@ static gpointer convert_thread(gpointer data)
         j->progress = 0;
         g_mutex_unlock(&q.lock);
         g_clear_pointer(&messages, g_free);
-        int rc = run_encoder(j, copy, j->encoder, crop, tmp, duration, &messages);
-        /* fehlt der Grafikkarte kurz Speicher (andere Umwandlung, Player, Erkennung), lohnt
-         * ein zweiter Versuch dort mehr als stundenlang auf dem Prozessor */
-        for (int retry = 1; rc > 0 && !copy && j->encoder == MD_ENCODER_GPU &&
-                            retry <= GPU_RETRIES && gpu_out_of_memory(messages); retry++) {
+        int rc = run_encoder(j, copy, j->encoder, true, crop, tmp, duration, &messages);
+        bool gpu = !copy && j->encoder == MD_ENCODER_GPU;
+        /* Scheitert die Grafikkarte, bleibt die Umwandlung trotzdem dort – auf dem Prozessor
+         * dauerte sie ein Vielfaches. Zuerst dekodiert der Prozessor und rechnet um, die
+         * Grafikkarte kodiert nur noch; fehlt ihr dann kurz Speicher (andere Umwandlung,
+         * Player, Erkennung), folgen nach einer Pause weitere Versuche. */
+        if (rc > 0 && gpu) {
+            md_log("GPU-Umwandlung fehlgeschlagen, neuer Versuch mit Dekodieren im Prozessor: "
+                   "%s (%s)", j->title, messages);
+            g_clear_pointer(&messages, g_free);
+            g_mutex_lock(&q.lock);
+            j->progress = 0;
+            g_mutex_unlock(&q.lock);
+            rc = run_encoder(j, false, MD_ENCODER_GPU, false, crop, tmp, duration, &messages);
+        }
+        for (int retry = 1; rc > 0 && gpu && retry <= GPU_RETRIES && gpu_out_of_memory(messages);
+             retry++) {
             md_log("Grafikkarte hat zu wenig Speicher, neuer Versuch %d/%d in %d s: %s",
                    retry, GPU_RETRIES, GPU_RETRY_WAIT, j->title);
             if (!convert_pause(j, GPU_RETRY_WAIT)) {
@@ -5926,12 +5951,7 @@ static gpointer convert_thread(gpointer data)
             g_mutex_lock(&q.lock);
             j->progress = 0;
             g_mutex_unlock(&q.lock);
-            rc = run_encoder(j, false, MD_ENCODER_GPU, crop, tmp, duration, &messages);
-        }
-        if (rc > 0 && !copy && j->encoder == MD_ENCODER_GPU) {
-            md_log("GPU-Umwandlung fehlgeschlagen, versuche CPU: %s (%s)", j->title, messages);
-            g_clear_pointer(&messages, g_free);
-            rc = run_encoder(j, false, MD_ENCODER_CPU, crop, tmp, duration, &messages);
+            rc = run_encoder(j, false, MD_ENCODER_GPU, false, crop, tmp, duration, &messages);
         }
         if (rc < 0) {
             interrupted = true;

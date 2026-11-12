@@ -10,7 +10,7 @@
 #include <glib.h>
 #include <stdbool.h>
 
-#define MD_VERSION "2.8.1"
+#define MD_VERSION "2.8.2"
 #define MD_MAX_DOWNLOADS 4      /* höchstens so viele Downloads gleichzeitig */
 #define MD_MAX_CONVERSIONS 3    /* höchstens so viele Umwandlungen gleichzeitig */
 #define MD_DEFAULT_GPU_QUALITY 64   /* VAAPI-AV1 (0–255), wie im AV1-Converter */

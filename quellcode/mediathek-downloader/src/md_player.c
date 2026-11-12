@@ -115,6 +115,7 @@ typedef struct {
 
 static Player *player;          /* NULL = kein Player offen */
 static double last_volume = 1.0;
+static void (*volume_callback)(double volume);
 static bool auto_skip_intro, auto_skip_recap;
 #define RECAP_INTRO_GAP 5.0     /* so knapp nach dem Rückblick zählt das Intro als direkt danach */
 
@@ -943,8 +944,10 @@ static void on_volume_changed(GtkScaleButton *b, double value, gpointer data)
 {
     (void)b;
     Player *p = data;
+    bool changed = value != last_volume;
     last_volume = value;
     g_object_set(p->playbin, "volume", value, "mute", FALSE, NULL);
+    if (changed && volume_callback) volume_callback(value);
 }
 
 /* Ziehen an der Zeitleiste */
@@ -2077,6 +2080,18 @@ static Player *player_new(GtkStack *stack)
 void md_player_set_auto_skip_recap(bool on)
 {
     auto_skip_recap = on;
+}
+
+void md_player_set_volume(double volume)
+{
+    last_volume = CLAMP(volume, 0, 1);
+    if (player && player->volume)
+        gtk_scale_button_set_value(GTK_SCALE_BUTTON(player->volume), last_volume);
+}
+
+void md_player_on_volume_changed(void (*callback)(double volume))
+{
+    volume_callback = callback;
 }
 
 void md_player_set_auto_skip_intro(bool on)

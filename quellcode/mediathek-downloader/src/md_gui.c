@@ -283,6 +283,7 @@ typedef struct {
     bool auto_news;             /* neue Folgen geladener Serien von selbst laden */
     bool skip_intro;            /* erkannte Intros im Player von selbst überspringen */
     bool skip_recap;            /* erkannte Rückblicke ebenso */
+    double volume;              /* Lautstärke des Players beim letzten Mal, 0…1 */
     bool gpu_convert;           /* Player: Farbumrechnung in der Grafikkarte */
     bool hold_downloads, hold_conversions;  /* alle Downloads bzw. Umwandlungen angehalten */
 } Config;
@@ -902,6 +903,10 @@ static void settings_load(void)
     md_player_set_auto_skip_intro(c->skip_intro);
     c->skip_recap = settings_bool(file, "RueckblickUeberspringen", false);
     md_player_set_auto_skip_recap(c->skip_recap);
+    c->volume = g_key_file_has_key(file, SETTINGS_GROUP, "Lautstaerke", NULL)
+                    ? CLAMP(g_key_file_get_double(file, SETTINGS_GROUP, "Lautstaerke", NULL), 0, 1)
+                    : 1.0;
+    md_player_set_volume(c->volume);
     c->gpu_convert = settings_bool(file, "PlayerGrafikkarte", true);
     md_player_set_gpu_convert(c->gpu_convert);
     /* Tasten des Players: nur abweichende stehen in der Datei, als GDK-Tastenname */
@@ -946,6 +951,7 @@ static void settings_save(void)
     g_key_file_set_boolean(file, SETTINGS_GROUP, "NeueFolgenLaden", c->auto_news);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "IntroUeberspringen", c->skip_intro);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "RueckblickUeberspringen", c->skip_recap);
+    g_key_file_set_double(file, SETTINGS_GROUP, "Lautstaerke", c->volume);
     g_key_file_set_boolean(file, SETTINGS_GROUP, "PlayerGrafikkarte", c->gpu_convert);
     for (int i = 0; i < md_player_key_count(); i++) {
         guint key = md_player_key_get(i);
@@ -963,6 +969,25 @@ static void settings_save(void)
     if (!g_key_file_save_to_file(file, path, NULL)) md_log("Einstellungen nicht gespeichert");
     g_free(path);
     g_key_file_free(file);
+}
+
+/* Lautstärke erst speichern, wenn sie eine Sekunde ruht: beim Ziehen am Regler oder Halten der
+ * Pfeiltaste kommen viele Werte kurz hintereinander */
+static guint volume_save_id;
+
+static gboolean save_volume(gpointer data)
+{
+    (void)data;
+    volume_save_id = 0;
+    settings_save();
+    return G_SOURCE_REMOVE;
+}
+
+static void on_player_volume(double volume)
+{
+    ui.cfg.volume = volume;
+    if (volume_save_id) g_source_remove(volume_save_id);
+    volume_save_id = g_timeout_add_seconds(1, save_volume, NULL);
 }
 
 /* Tempolimit, Parallelität und Suchfilter an die Engine geben */
@@ -7361,6 +7386,7 @@ static void on_activate(GtkApplication *app, gpointer d)
         return;
     }
     settings_load();
+    md_player_on_volume_changed(on_player_volume);
     apply_queue_settings();
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css_provider, CSS, -1, NULL);
@@ -7478,6 +7504,7 @@ int main(int argc, char **argv)
     g_unix_signal_add(SIGHUP, on_quit_request, NULL);
 #endif
     int rc = g_application_run(G_APPLICATION(ui.app), argc, argv);
+    if (volume_save_id) save_volume(NULL);   /* Lautstärke kurz vor dem Beenden geändert */
     md_shutdown();
     g_object_unref(ui.app);
     return rc;

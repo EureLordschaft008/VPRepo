@@ -47,6 +47,10 @@ bool md_player_gpu_convert_possible(void);
 void md_player_set_auto_skip_intro(bool on);
 /* Erkannte Rückblicke („Was bisher geschah“) von selbst überspringen */
 void md_player_set_auto_skip_recap(bool on);
+/* Lautstärke 0…1 für den nächsten (und den laufenden) Player, etwa die gespeicherte vom letzten Mal */
+void md_player_set_volume(double volume);
+/* wird nach jeder Änderung der Lautstärke im Player aufgerufen, damit sie gespeichert werden kann */
+void md_player_on_volume_changed(void (*callback)(double volume));
 /* Tasten des Players, je Zeile "Taste\tWirkung"; gilt bis zum nächsten Aufruf */
 const char *md_player_keys_text(void);
 /* Tastenbelegung: Aktionen 0 … count−1 mit Namen für die Einstellungsdatei (id), Wirkung,
